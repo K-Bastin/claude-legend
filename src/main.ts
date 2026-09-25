@@ -3,6 +3,7 @@ import "./styles.css";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -94,6 +95,17 @@ let syncing = false;
 const tabs: Tab[] = [];
 let activeTab: Tab | null = null;
 let tabSeq = 0;
+/** Set once the window is closing: sessions stopped by the shutdown must still be restored. */
+let shuttingDown = false;
+
+const OPEN_TABS_KEY = "claude-legend:open-tabs";
+
+interface SavedTab {
+  sessionId: string;
+  cwd: string;
+  title: string;
+  active: boolean;
+}
 
 // ---------- helpers ----------
 
@@ -375,6 +387,7 @@ function renderTab(tab: Tab) {
     closeTab(tab);
   };
   tab.tabEl.className = `tab${tab === activeTab ? " active" : ""}${tab.exited ? " exited" : ""}`;
+  saveOpenTabs();
   tab.tabEl.title = `${tab.title}\n${tab.cwd}`;
   tab.tabEl.replaceChildren(
     ...[tab.activity ? el("span", { className: "activity" }) : null, el("span", { className: "t", textContent: tab.title }), close].filter(
@@ -404,6 +417,7 @@ function closeTab(tab: Tab) {
   tab.el.remove();
   tab.tabEl.remove();
   tabs.splice(tabs.indexOf(tab), 1);
+  saveOpenTabs();
   if (activeTab === tab) {
     activeTab = null;
     const next = tabs[tabs.length - 1];
@@ -448,6 +462,45 @@ async function launch(tab: Tab, sessionId: string | null): Promise<boolean> {
     renderTab(tab);
     return false;
   }
+}
+
+// ---------- tab persistence ----------
+
+/** Remembers running sessions so they come back if the app restarts or is killed. */
+function saveOpenTabs() {
+  if (shuttingDown) return;
+  const saved: SavedTab[] = tabs
+    .filter((t) => t.sessionId && !t.exited)
+    .map((t) => ({ sessionId: t.sessionId!, cwd: t.cwd, title: t.title, active: t === activeTab }));
+  try {
+    localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(saved));
+  } catch {
+    // Storage unavailable: tabs simply won't be restored.
+  }
+}
+
+function loadSavedTabs(): SavedTab[] {
+  try {
+    const saved = JSON.parse(localStorage.getItem(OPEN_TABS_KEY) ?? "[]");
+    return Array.isArray(saved) ? saved : [];
+  } catch {
+    return [];
+  }
+}
+
+async function restoreTabs() {
+  // Sessions with no prompt yet have no file to resume from.
+  const resumable = new Set(sessions.filter((s) => s.location === "local").map((s) => s.id));
+  let active: Tab | null = null;
+  for (const saved of loadSavedTabs()) {
+    if (!resumable.has(saved.sessionId) || tabs.some((t) => t.sessionId === saved.sessionId)) continue;
+    const tab = createTab(saved.title, saved.cwd, saved.sessionId);
+    tab.term.write("\x1b[2m[Session rouverte après le redémarrage de Claude Legend]\x1b[0m\r\n");
+    await launch(tab, saved.sessionId);
+    if (saved.active) active = tab;
+  }
+  if (active) activateTab(active);
+  saveOpenTabs();
 }
 
 async function restartTab(tab: Tab) {
@@ -654,12 +707,17 @@ async function boot() {
     renderStatus();
     if (e.payload.conflicts.length) toast(e.payload.conflicts.join("\n"), "warn", 15000);
   });
+  await getCurrentWindow().onCloseRequested(() => {
+    saveOpenTabs();
+    shuttingDown = true;
+  });
   await listen("sessions-changed", () => refreshSessions());
   window.addEventListener("focus", () => refreshSessions());
   setInterval(refreshSessions, 20000);
   setInterval(() => renderSessions(), 60000);
 
   await refreshSessions();
+  await restoreTabs();
   if (!info.syncEnabled && !settings.syncDir) {
     toast("Choisis un dossier de synchronisation dans les réglages pour retrouver tes conversations sur tes autres PC.", "info", 10000);
   }
