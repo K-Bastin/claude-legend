@@ -325,14 +325,17 @@ input:focus {
 .term {
   position: absolute;
   inset: 0;
-  padding: 8px 4px 4px 10px;
   display: none;
 }
 .term.active {
   display: block;
 }
+/* The padding must sit on .xterm, not on its parent: FitAddon subtracts the
+   terminal element's padding but reads the parent's border-box size, so parent
+   padding makes it propose one row/column too many. */
 .term .xterm {
   height: 100%;
+  padding: 8px 4px 4px 10px;
 }
 
 #welcome {
