@@ -638,6 +638,12 @@ mod tests {
         }
     }
 
+    /// A string as it appears inside JSON (backslashes of Windows paths doubled).
+    fn json_str(s: &str) -> String {
+        let quoted = serde_json::to_string(s).unwrap();
+        quoted[1..quoted.len() - 1].to_string()
+    }
+
     fn line(cwd: &str, text: &str) -> String {
         format!(
             "{}\n",
@@ -651,7 +657,10 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("cl-test-{}", uuid::Uuid::new_v4()));
         let shared = tmp.join("shared");
         let (home_a, home_b) = (tmp.join("claude-a"), tmp.join("claude-b"));
-        let (proj_a, proj_b) = (tmp.join("pc-a/work/app"), tmp.join("pc-b/dev/app"));
+        let (proj_a, proj_b) = (
+            tmp.join("pc-a").join("work").join("app"),
+            tmp.join("pc-b").join("dev").join("app"),
+        );
         for d in [&proj_a, &proj_b] {
             std::fs::create_dir_all(d).unwrap();
         }
@@ -690,10 +699,10 @@ mod tests {
         let file_b = paths::local_project_dir(&pb).join(format!("{id}.jsonl"));
         let imported = std::fs::read_to_string(&file_b).unwrap();
         assert!(
-            imported.contains(&format!("\"cwd\":\"{pb}\"")),
+            imported.contains(&format!("\"cwd\":\"{}\"", json_str(&pb))),
             "{imported}"
         );
-        assert!(imported.contains(&format!("lis {pb}/src/main.rs")));
+        assert!(imported.contains(&json_str(&format!("lis {pb}/src/main.rs"))));
         let memory =
             std::fs::read_to_string(paths::local_project_dir(&pb).join("memory/MEMORY.md"))
                 .unwrap();
@@ -717,8 +726,12 @@ mod tests {
         assert_eq!((report.pushed, report.pulled), (0, 1));
         let back = std::fs::read_to_string(&file_a).unwrap();
         assert!(back.contains("suite sur B"));
-        assert!(!back.contains(&pb));
-        assert_eq!(back.matches(&format!("\"cwd\":\"{pa}\"")).count(), 2);
+        assert!(!back.contains(&json_str(&pb)));
+        assert_eq!(
+            back.matches(&format!("\"cwd\":\"{}\"", json_str(&pa)))
+                .count(),
+            2
+        );
 
         // Divergent edits on both sides: newest wins, the other is backed up.
         std::fs::write(&file_a, format!("{}{}", back, line(&pa, "A diverge"))).unwrap();
