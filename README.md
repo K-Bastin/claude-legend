@@ -27,12 +27,20 @@ Le code des projets n'est pas synchronisé : utilise git pour ça.
 | Ctrl+Shift+T | Nouvelle session |
 | Ctrl+Shift+W | Fermer l'onglet |
 | Ctrl+Tab | Onglet suivant |
+| Ctrl+Alt+1…4 | Aller au panneau 1 à 4 (écran partagé) |
 | Shift+Entrée | Retour à la ligne dans le prompt |
 | Ctrl+C / Ctrl+Shift+C | Copier la sélection (Ctrl+C sans sélection = interrompre) |
 | Ctrl+V / Ctrl+Shift+V | Coller (une image du presse-papier est transmise à Claude) |
 | Ctrl + / - / 0 | Taille du texte |
 
 Glisser-déposer un fichier dans le terminal insère son chemin.
+
+### Écran partagé
+
+Les boutons à droite des onglets affichent 1, 2 (côte à côte ou empilés), 3 ou 4 conversations
+en même temps. La conversation choisie (liste ou onglet) s'ouvre dans le panneau actif, surligné ;
+un onglet ou une conversation de la liste peut aussi être glissé directement dans un panneau.
+La disposition et le contenu des panneaux sont retrouvés au prochain lancement.
 
 ## Développement
 

@@ -23,8 +23,12 @@
         <footer id="status"></footer>
       </aside>
       <main id="main">
-        <nav id="tabs"></nav>
-        <div id="terminals"></div>
+        <div id="tabbar" class="hidden">
+          <nav id="tabs"></nav>
+          <div id="layouts" role="group" aria-label="Disposition des panneaux"></div>
+        </div>
+        <div id="terminals" class="layout-1"></div>
+        <div id="term-holder" hidden></div>
         <div id="welcome">
           <div class="welcome-box">
             <div class="big-logo">✻</div>
