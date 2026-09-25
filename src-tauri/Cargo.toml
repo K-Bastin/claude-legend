@@ -32,6 +32,15 @@ gethostname = "1.1.0"
 anyhow = "1.0.104"
 tauri-plugin-dialog = "2.7.3"
 tauri-plugin-clipboard-manager = "2.3.3"
+keyring = "4.2.0"
+quick-xml = "0.42.0"
+httpdate = "1.0.3"
+base64 = "0.23.1"
+percent-encoding = "2.3.2"
+ssh2 = "0.9.6"
+ureq = { version = "3.4.2", default-features = false, features = ["native-tls", "gzip"] }
+suppaftp = { version = "12.1.0", features = ["native-tls"] }
+native-tls = "0.2.18"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

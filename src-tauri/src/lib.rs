@@ -2,18 +2,21 @@ mod config;
 mod paths;
 mod pty;
 mod sessions;
+mod store;
 mod sync;
 
-use config::{Machine, Settings};
+use config::{Machine, Settings, SyncTarget};
 use portable_pty::PtySize;
 use pty::{PtyEvent, PtyManager};
 use serde::{Deserialize, Serialize};
 use sessions::SessionIndex;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use sync::{LockInfo, SyncReport, Syncer};
+use store::{ConnectError, Remote};
+use sync::{LockInfo, RemoteIndex, SyncReport, Syncer};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -26,7 +29,11 @@ struct AppState {
     ptys: PtyManager,
     /// pty id -> session id
     open: Mutex<HashMap<u32, String>>,
-    sync_guard: Mutex<()>,
+    /// Connection to the sync target, kept between operations. Its lock also
+    /// serialises every sync operation.
+    remote: Mutex<Option<Remote>>,
+    /// Snapshot of the sync target used by the UI, refreshed by each full sync.
+    remote_index: Mutex<Option<RemoteIndex>>,
     last_report: Mutex<Option<SyncReport>>,
 }
 
@@ -41,24 +48,42 @@ impl AppState {
         self.open.lock().unwrap().values().cloned().collect()
     }
 
-    /// Runs `f` with a syncer when a sync folder is configured.
+    fn state_path(&self) -> PathBuf {
+        self.data_dir.join("sync-state.json")
+    }
+
+    /// Runs `f` with a syncer when synchronisation is configured.
     fn with_syncer<T>(&self, f: impl FnOnce(&Syncer) -> T) -> Option<T> {
         let settings = self.settings.lock().unwrap().clone();
-        let dir = settings.sync_dir.filter(|d| !d.trim().is_empty())?;
+        if !settings.sync.is_enabled() {
+            return None;
+        }
+        let open_sessions = self.open_session_ids();
+        let mut guard = self.remote.lock().unwrap();
+        if guard.as_ref().is_none_or(|r| r.target() != &settings.sync) {
+            let secret = store::secret::load(&settings.sync);
+            *guard = Some(Remote::new(settings.sync.clone(), secret));
+        }
+        let remote = guard.as_mut().unwrap();
+        remote.begin();
         let syncer = Syncer {
-            root: sync::sync_root(&dir),
+            remote: RefCell::new(remote),
             machine: &self.machine,
             machine_name: &settings.machine_name,
-            state_path: self.data_dir.join("sync-state.json"),
+            state_path: self.state_path(),
             conflicts_dir: self.data_dir.join("conflicts"),
             index: &self.index,
-            open_sessions: self.open_session_ids(),
+            open_sessions,
+            fresh_index: RefCell::new(None),
         };
-        Some(f(&syncer))
+        let out = f(&syncer);
+        if let Some(index) = syncer.fresh_index.take() {
+            *self.remote_index.lock().unwrap() = Some(index);
+        }
+        Some(out)
     }
 
     fn run_full_sync(&self, app: &AppHandle) -> Option<SyncReport> {
-        let _guard = self.sync_guard.lock().unwrap();
         let report = self.with_syncer(|s| s.sync_all())?;
         *self.last_report.lock().unwrap() = Some(report.clone());
         let _ = app.emit("sync-report", &report);
@@ -93,6 +118,7 @@ struct AppInfo {
     claude_path: Option<String>,
     claude_error: Option<String>,
     sync_enabled: bool,
+    sync_label: String,
     last_report: Option<SyncReport>,
     home: String,
 }
@@ -105,7 +131,8 @@ fn app_info(state: State<AppState>) -> AppInfo {
         machine_id: state.machine.id.clone(),
         claude_path: claude.as_ref().ok().map(|p| p.display().to_string()),
         claude_error: claude.err(),
-        sync_enabled: settings.sync_dir.is_some_and(|d| !d.trim().is_empty()),
+        sync_enabled: settings.sync.is_enabled(),
+        sync_label: settings.sync.label(),
         last_report: state.last_report.lock().unwrap().clone(),
         home: paths::home_dir().display().to_string(),
     }
@@ -116,15 +143,74 @@ fn get_settings(state: State<AppState>) -> Settings {
     state.settings.lock().unwrap().clone()
 }
 
+/// `secret` replaces the stored password when given (empty removes it).
 #[tauri::command]
-fn save_settings(app: AppHandle, state: State<AppState>, settings: Settings) -> CmdResult<()> {
-    config::save_json(&state.config_dir.join("settings.json"), &settings).map_err(err)?;
-    *state.settings.lock().unwrap() = settings;
-    std::thread::spawn(move || {
+async fn save_settings(
+    app: AppHandle,
+    settings: Settings,
+    secret: Option<String>,
+) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        state.run_full_sync(&app);
-    });
-    Ok(())
+        if let Some(secret) = secret {
+            store::secret::save(&settings.sync, &secret).map_err(err)?;
+        }
+        config::save_json(&state.config_dir.join("settings.json"), &settings).map_err(err)?;
+        *state.settings.lock().unwrap() = settings;
+        // Waits for a running sync, then reconnects with the new settings.
+        *state.remote.lock().unwrap() = None;
+        *state.remote_index.lock().unwrap() = None;
+        std::thread::spawn(move || {
+            let state = app.state::<AppState>();
+            state.run_full_sync(&app);
+            let _ = app.emit("sessions-changed", ());
+        });
+        Ok(())
+    })
+    .await
+    .map_err(err)?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TestOutcome {
+    ok: bool,
+    message: String,
+    /// Key presented by an SFTP server that is not trusted yet.
+    unknown_fingerprint: Option<String>,
+}
+
+/// Connects to a sync target and checks it is writable. Uses the stored
+/// password when `secret` is not given.
+#[tauri::command]
+async fn test_sync(target: SyncTarget, secret: Option<String>) -> CmdResult<TestOutcome> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let secret = secret.or_else(|| store::secret::load(&target));
+        Ok(match store::test(&target, secret.as_deref()) {
+            Ok(()) => TestOutcome {
+                ok: true,
+                message: "Connexion réussie, lecture et écriture autorisées.".into(),
+                unknown_fingerprint: None,
+            },
+            Err(ConnectError::UnknownHost { fingerprint }) => TestOutcome {
+                ok: false,
+                message: String::new(),
+                unknown_fingerprint: Some(fingerprint),
+            },
+            Err(e) => TestOutcome {
+                ok: false,
+                message: e.to_string(),
+                unknown_fingerprint: None,
+            },
+        })
+    })
+    .await
+    .map_err(err)?
+}
+
+#[tauri::command]
+fn has_sync_secret(target: SyncTarget) -> bool {
+    store::secret::has(&target)
 }
 
 #[tauri::command]
@@ -132,31 +218,33 @@ fn list_sessions(state: State<AppState>) -> Vec<SessionEntry> {
     let open = state.open_session_ids();
     let locals = state.index.scan();
     let mut entries: Vec<SessionEntry> = Vec::new();
-    let remote_info = state.with_syncer(|s| {
-        let projects = s.projects();
-        let mut remote: HashMap<String, (sync::RemoteMeta, sync::ProjectInfo, Option<String>)> =
-            HashMap::new();
-        for (project, mapping) in &projects {
-            for meta in s.remote_sessions(&project.key) {
-                remote.insert(meta.id.clone(), (meta, project.clone(), mapping.clone()));
-            }
+    let index = state
+        .remote_index
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_default();
+    let mut remote: HashMap<String, (sync::RemoteMeta, sync::ProjectInfo, Option<String>)> =
+        HashMap::new();
+    for project in index.projects {
+        for meta in project.sessions {
+            remote.insert(
+                meta.id.clone(),
+                (meta, project.info.clone(), project.mapping.clone()),
+            );
         }
-        let ids: Vec<String> = locals
-            .iter()
-            .map(|l| l.id.clone())
-            .chain(remote.keys().cloned())
-            .collect();
-        let locks: HashMap<String, LockInfo> = ids
-            .into_iter()
-            .filter_map(|id| s.foreign_lock(&id).map(|l| (id, l)))
-            .collect();
-        let state_hashes: HashMap<String, String> =
-            config::load_json::<serde_json::Value>(&s.state_path)
-                .and_then(|v| serde_json::from_value(v["hashes"].clone()).ok())
-                .unwrap_or_default();
-        (remote, locks, state_hashes)
-    });
-    let (mut remote, locks, hashes) = remote_info.unwrap_or_default();
+    }
+    // Liveness is judged at index time, so a long sync interval doesn't make
+    // every lock look stale.
+    let locks: HashMap<String, LockInfo> = index
+        .locks
+        .into_iter()
+        .filter(|l| l.is_foreign(&state.machine.id, index.at))
+        .map(|l| (l.session_id.clone(), l))
+        .collect();
+    let hashes = config::load_json::<sync::SyncState>(&state.state_path())
+        .unwrap_or_default()
+        .hashes;
 
     for local in locals {
         let identity = state.index.project_identity(&local.cwd);
@@ -251,10 +339,7 @@ fn open_session_blocking(
 
     let (session_id, mut args) = match &request.session_id {
         Some(id) => {
-            if let Some(report) = {
-                let _guard = state.sync_guard.lock().unwrap();
-                state.with_syncer(|s| s.sync_one(id))
-            } {
+            if let Some(report) = state.with_syncer(|s| s.sync_one(id)) {
                 warnings.extend(report.errors);
                 warnings.extend(report.conflicts);
             }
@@ -270,7 +355,9 @@ fn open_session_blocking(
     };
     args.extend(settings.extra_args.split_whitespace().map(str::to_string));
 
-    state.with_syncer(|s| s.acquire_lock(&session_id));
+    if let Some(Err(e)) = state.with_syncer(|s| s.acquire_lock(&session_id)) {
+        warnings.push(format!("Verrou de session non posé : {e:#}"));
+    }
 
     let exit_app = app.clone();
     let pty_id = state
@@ -291,8 +378,7 @@ fn open_session_blocking(
                 let session = state.open.lock().unwrap().remove(&pty_id);
                 if let Some(session) = session {
                     state.with_syncer(|s| {
-                        s.release_lock(&session);
-                        let _guard = state.sync_guard.lock().unwrap();
+                        let _ = s.release_lock(&session);
                         s.sync_one(&session)
                     });
                 }
@@ -328,8 +414,17 @@ fn pty_kill(state: State<AppState>, id: u32) {
 }
 
 #[tauri::command]
-fn lock_status(state: State<AppState>, session_id: String) -> Option<LockInfo> {
-    state.with_syncer(|s| s.foreign_lock(&session_id)).flatten()
+async fn lock_status(app: AppHandle, session_id: String) -> CmdResult<Option<LockInfo>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state
+            .with_syncer(|s| s.foreign_lock(&session_id))
+            .transpose()
+            .map(Option::flatten)
+            .map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(err)?
 }
 
 #[tauri::command]
@@ -373,6 +468,7 @@ fn background_loop(app: AppHandle) {
             last_heartbeat = Instant::now();
             for id in state.open_session_ids() {
                 state.with_syncer(|s| s.acquire_lock(&id));
+                // Errors surface in the next sync report.
             }
         }
         if last_sync.is_none_or(|t| t.elapsed() >= Duration::from_secs(interval)) {
@@ -402,7 +498,8 @@ pub fn run() {
                 index: SessionIndex::default(),
                 ptys: PtyManager::default(),
                 open: Mutex::new(HashMap::new()),
-                sync_guard: Mutex::new(()),
+                remote: Mutex::new(None),
+                remote_index: Mutex::new(None),
                 last_report: Mutex::new(None),
             });
             let handle = app.handle().clone();
@@ -421,6 +518,8 @@ pub fn run() {
             lock_status,
             sync_now,
             map_project,
+            test_sync,
+            has_sync_secret,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -429,7 +528,11 @@ pub fn run() {
                 let state = app.state::<AppState>();
                 let open = state.open_session_ids();
                 state.ptys.kill_all();
-                state.with_syncer(|s| open.iter().for_each(|id| s.release_lock(id)));
+                state.with_syncer(|s| {
+                    for id in &open {
+                        let _ = s.release_lock(id);
+                    }
+                });
             }
         });
 }
