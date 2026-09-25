@@ -50,6 +50,11 @@ npm test               # tests Rust
 > `npm run dev:no-watch`, qui ne relance pas l'application : ferme-la et relance-la toi-même
 > pour prendre en compte une modification Rust.
 
+**Aperçu dans un navigateur** : avec `npm run dev` (ou pendant un `tauri dev`), ouvre
+http://localhost:1420 dans un navigateur. L'interface y tourne avec des données et des terminaux
+simulés (`src/dev/preview.ts`), pratique pour travailler la mise en page. Ce code n'est jamais
+inclus dans l'application compilée.
+
 Le hook `pre-commit` lance `npm run typecheck` et `cargo fmt --check`.
 Avant d'ouvrir une PR, vérifie aussi `cargo clippy --all-targets -- -D warnings` dans `src-tauri/`.
 

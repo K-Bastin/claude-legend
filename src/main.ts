@@ -663,6 +663,9 @@ function renderWelcomeWarning() {
 // ---------- boot ----------
 
 async function boot() {
+  if (import.meta.env.DEV && !("__TAURI_INTERNALS__" in window)) {
+    (await import("./dev/preview")).installPreview();
+  }
   settings = await invoke<Settings>("get_settings");
   info = await invoke<AppInfo>("app_info");
   lastReport = info.lastReport;
