@@ -1,0 +1,2 @@
+npm run typecheck
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
