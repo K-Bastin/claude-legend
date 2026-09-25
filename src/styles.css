@@ -598,3 +598,62 @@ dialog menu {
 .toast.warn {
   border-left-color: var(--warn);
 }
+
+/* ---------- sync settings ---------- */
+
+dialog fieldset {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px 4px;
+  margin: 0 0 14px;
+}
+dialog legend {
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+dialog select {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 9px;
+}
+dialog label.narrow {
+  flex: 0 0 90px;
+}
+dialog label.check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+dialog label.check input {
+  width: auto;
+}
+#fingerprint {
+  margin: 0 0 12px;
+  font-size: 11px;
+  color: var(--muted);
+  word-break: break-all;
+}
+#fingerprint:empty {
+  display: none;
+}
+.test-row {
+  align-items: center;
+  margin-bottom: 10px;
+}
+#test-result {
+  font-size: 12px;
+}
+#test-result.ok {
+  color: var(--ok);
+}
+#test-result.fail {
+  color: var(--danger);
+}
+dialog {
+  max-height: 92vh;
+  overflow-y: auto;
+}

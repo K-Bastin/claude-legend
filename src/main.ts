@@ -11,11 +11,12 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { fillSyncForm, missingSyncField, readSyncForm, updateSyncVisibility, type SyncTarget } from "./sync-form";
 
 // ---------- types ----------
 
 interface Settings {
-  syncDir: string | null;
+  sync: SyncTarget;
   claudePath: string | null;
   extraArgs: string;
   machineName: string;
@@ -61,6 +62,7 @@ interface AppInfo {
   claudePath: string | null;
   claudeError: string | null;
   syncEnabled: boolean;
+  syncLabel: string;
   lastReport: SyncReport | null;
   home: string;
 }
@@ -101,6 +103,14 @@ let panes: (Tab | null)[] = [null];
 let activePane = 0;
 /** Set once the window is closing: sessions stopped by the shutdown must still be restored. */
 let shuttingDown = false;
+/** SFTP host key approved in the settings dialog, see readSyncForm. */
+let approvedFingerprint: string | null = null;
+
+interface TestOutcome {
+  ok: boolean;
+  message: string;
+  unknownFingerprint: string | null;
+}
 
 const OPEN_TABS_KEY = "claude-legend:open-tabs";
 
@@ -286,7 +296,7 @@ function renderStatus() {
       lines.push(errs);
     }
   }
-  lines.push(el("div", { textContent: settings.machineName }));
+  lines.push(el("div", { textContent: info.syncEnabled ? `${settings.machineName} · ${info.syncLabel}` : settings.machineName }));
   status.replaceChildren(...lines);
 }
 
@@ -808,46 +818,116 @@ function sendRaw(tab: Tab, data: string) {
 
 // ---------- settings ----------
 
-function openSettings() {
+function settingsField(name: string) {
+  return $<HTMLFormElement>("#settings-form").elements.namedItem(name) as HTMLInputElement;
+}
+
+function renderFingerprint() {
+  const target = readSyncForm($<HTMLFormElement>("#settings-form"), approvedFingerprint);
+  $("#fingerprint").textContent =
+    target.kind === "sftp" && approvedFingerprint ? `Serveur approuvé — empreinte ${approvedFingerprint}` : "";
+}
+
+function showTestResult(text: string, kind: "ok" | "fail" | "" = "") {
+  const result = $("#test-result");
+  result.textContent = text;
+  result.className = kind;
+}
+
+async function openSettings() {
   const form = $<HTMLFormElement>("#settings-form");
-  const field = (name: string) => form.elements.namedItem(name) as HTMLInputElement;
-  field("syncDir").value = settings.syncDir ?? "";
-  field("machineName").value = settings.machineName;
-  field("claudePath").value = settings.claudePath ?? "";
-  field("extraArgs").value = settings.extraArgs;
-  field("fontSize").value = String(settings.fontSize);
-  field("syncIntervalSecs").value = String(settings.syncIntervalSecs);
+  fillSyncForm(form, settings.sync);
+  approvedFingerprint = settings.sync.kind === "sftp" ? settings.sync.fingerprint : null;
+  renderFingerprint();
+  showTestResult("");
+  settingsField("machineName").value = settings.machineName;
+  settingsField("claudePath").value = settings.claudePath ?? "";
+  settingsField("extraArgs").value = settings.extraArgs;
+  settingsField("fontSize").value = String(settings.fontSize);
+  settingsField("syncIntervalSecs").value = String(settings.syncIntervalSecs);
   $("#claude-detected").textContent = info.claudePath ? `Détecté : ${info.claudePath}` : info.claudeError ?? "";
+  const hasSecret = settings.sync.kind !== "none" && (await invoke<boolean>("has_sync_secret", { target: settings.sync }).catch(() => false));
+  settingsField("secret").placeholder = hasSecret ? "enregistré — laisser vide pour le conserver" : "";
   const dialog = $<HTMLDialogElement>("#settings-dialog");
   dialog.returnValue = "";
   dialog.showModal();
 }
 
+/** Tests the target in the form, asking to approve an unknown SFTP host key. */
+async function testSyncTarget(): Promise<{ ok: boolean; message: string }> {
+  const target = readSyncForm($<HTMLFormElement>("#settings-form"), approvedFingerprint);
+  const missing = missingSyncField(target);
+  if (missing) return { ok: false, message: missing };
+  if (target.kind === "none") return { ok: true, message: "" };
+  const secret = settingsField("secret").value || null;
+  showTestResult("Connexion…");
+  try {
+    let outcome = await invoke<TestOutcome>("test_sync", { target, secret });
+    if (outcome.unknownFingerprint && target.kind === "sftp") {
+      const choice = await ask(
+        `Première connexion à ${target.host}. Empreinte de la clé du serveur :\n\n${outcome.unknownFingerprint}\n\n` +
+          `Vérifie qu'elle correspond à celle du serveur (sur le serveur : ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub). ` +
+          `Faire confiance à ce serveur ?`,
+        [
+          { label: "Annuler", value: "cancel" },
+          { label: "Faire confiance", value: "trust", primary: true },
+        ],
+      );
+      if (choice !== "trust") return { ok: false, message: "Serveur non approuvé." };
+      approvedFingerprint = outcome.unknownFingerprint;
+      renderFingerprint();
+      outcome = await invoke<TestOutcome>("test_sync", { target: { ...target, fingerprint: approvedFingerprint }, secret });
+    }
+    return { ok: outcome.ok, message: outcome.message };
+  } catch (e) {
+    return { ok: false, message: `${e}` };
+  }
+}
+
+async function runSyncTest(): Promise<boolean> {
+  const { ok, message } = await testSyncTarget();
+  showTestResult(ok ? message || "Connexion réussie." : message, ok ? "ok" : "fail");
+  return ok;
+}
+
+/** Validates the sync target before the dialog closes; false keeps it open. */
+async function confirmSave(): Promise<boolean> {
+  const target = readSyncForm($<HTMLFormElement>("#settings-form"), approvedFingerprint);
+  const changed = JSON.stringify(target) !== JSON.stringify(settings.sync) || settingsField("secret").value !== "";
+  if (!changed || target.kind === "none") return true;
+  if (await runSyncTest()) return true;
+  const missing = missingSyncField(target);
+  if (missing) return false;
+  const choice = await ask(`La connexion a échoué :\n${$("#test-result").textContent}\n\nEnregistrer quand même ?`, [
+    { label: "Corriger", value: "fix", primary: true },
+    { label: "Enregistrer quand même", value: "save" },
+  ]);
+  return choice === "save";
+}
+
 async function saveSettingsFromForm() {
-  const form = $<HTMLFormElement>("#settings-form");
-  const field = (name: string) => (form.elements.namedItem(name) as HTMLInputElement).value.trim();
+  const field = (name: string) => settingsField(name).value.trim();
   const next: Settings = {
-    syncDir: field("syncDir") || null,
+    sync: readSyncForm($<HTMLFormElement>("#settings-form"), approvedFingerprint),
     machineName: field("machineName") || settings.machineName,
     claudePath: field("claudePath") || null,
     extraArgs: field("extraArgs"),
     fontSize: Number(field("fontSize")) || 14,
     syncIntervalSecs: Number(field("syncIntervalSecs")) || 60,
   };
+  const secret = settingsField("secret").value || null;
+  settingsField("secret").value = "";
   try {
-    await invoke("save_settings", { settings: next });
+    await invoke("save_settings", { settings: next, secret });
     settings = next;
     info = await invoke<AppInfo>("app_info");
     for (const t of tabs) {
       t.term.options.fontSize = settings.fontSize;
       t.fit.fit();
     }
+    syncing = info.syncEnabled;
     renderStatus();
     renderWelcomeWarning();
-    if (settings.syncDir) {
-      syncing = true;
-      renderStatus();
-    }
   } catch (e) {
     toast(`Réglages non enregistrés : ${e}`, "error");
   }
@@ -874,10 +954,34 @@ async function boot() {
   $("#btn-sync").onclick = syncNow;
   $("#btn-settings").onclick = openSettings;
   $("#search").oninput = renderSessions;
+  const settingsForm = $<HTMLFormElement>("#settings-form");
   $("#pick-sync-dir").onclick = async () => {
     const dir = await pickFolder("Dossier synchronisé entre tes PC");
-    if (dir) ((($("#settings-form") as HTMLFormElement).elements.namedItem("syncDir")) as HTMLInputElement).value = dir;
+    if (dir) settingsField("folderPath").value = dir;
   };
+  $("#pick-key").onclick = async () => {
+    const key = await openDialog({ multiple: false, directory: false, title: "Clé privée SSH", defaultPath: `${info.home}/.ssh` });
+    if (typeof key === "string") settingsField("keyPath").value = key;
+  };
+  $("#test-sync").onclick = () => runSyncTest();
+  settingsForm.addEventListener("change", (e) => {
+    const name = (e.target as HTMLInputElement).name;
+    if (name === "syncKind" || name === "sftpAuth") updateSyncVisibility(settingsForm);
+    showTestResult("");
+  });
+  settingsForm.addEventListener("input", (e) => {
+    // A different server needs its own host key approval.
+    const name = (e.target as HTMLInputElement).name;
+    if (name === "host" || name === "port") {
+      approvedFingerprint = null;
+      renderFingerprint();
+    }
+  });
+  settingsForm.addEventListener("submit", async (e) => {
+    if ((e.submitter as HTMLButtonElement | null)?.value !== "save") return;
+    e.preventDefault();
+    if (await confirmSave()) $<HTMLDialogElement>("#settings-dialog").close("save");
+  });
   $<HTMLDialogElement>("#settings-dialog").addEventListener("close", (e) => {
     if ((e.target as HTMLDialogElement).returnValue === "save") saveSettingsFromForm();
   });
@@ -930,7 +1034,7 @@ async function boot() {
 
   await refreshSessions();
   await restoreTabs();
-  if (!info.syncEnabled && !settings.syncDir) {
+  if (!info.syncEnabled) {
     toast("Choisis un dossier de synchronisation dans les réglages pour retrouver tes conversations sur tes autres PC.", "info", 10000);
   }
 }
