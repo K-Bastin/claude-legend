@@ -15,7 +15,7 @@ const HOUR = 3_600_000;
 const now = Date.now();
 
 const settings = {
-  syncDir: "/home/preview/Sync",
+  sync: { kind: "folder", path: "/home/preview/Sync" } as Record<string, unknown>,
   claudePath: null,
   extraArgs: "",
   machineName: "pc-preview",
@@ -98,7 +98,8 @@ export function installPreview() {
             machineId: "preview",
             claudePath: "/usr/local/bin/claude",
             claudeError: null,
-            syncEnabled: true,
+            syncEnabled: settings.sync.kind !== "none",
+            syncLabel: `${settings.sync.kind} (aperçu)`,
             lastReport: { at: now - 60_000, pushed: 2, pulled: 1, conflicts: [], errors: [] },
             home: "/home/preview",
           };
@@ -110,6 +111,13 @@ export function installPreview() {
           return { at: Date.now(), pushed: 0, pulled: 0, conflicts: [], errors: [] };
         case "map_project":
           return null;
+        case "has_sync_secret":
+          return false;
+        case "test_sync":
+          if (a.target.kind === "sftp" && !a.target.fingerprint) {
+            return { ok: false, message: "", unknownFingerprint: "SHA256:aperçuAPERÇUaperçu0123456789abcdefABCDEF" };
+          }
+          return { ok: true, message: "Connexion réussie (aperçu).", unknownFingerprint: null };
         case "open_session": {
           const id = nextPty++;
           const sessionId = a.request.sessionId ?? `new-${id}`;

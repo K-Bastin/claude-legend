@@ -1,7 +1,8 @@
 # Claude Legend
 
 Application desktop (Linux / Windows) qui lance le vrai Claude Code dans un terminal intégré
-et synchronise les conversations entre tes PC via un dossier partagé (Syncthing, Nextcloud, OneDrive…).
+et synchronise les conversations entre tes PC : dossier partagé (Syncthing, Nextcloud, OneDrive…),
+serveur SFTP, FTP/FTPS ou WebDAV.
 
 ## Fonctionnement
 
@@ -10,7 +11,7 @@ et synchronise les conversations entre tes PC via un dossier partagé (Syncthing
 - La barre latérale liste les conversations de `~/.claude/projects`, groupées par projet.
   Un clic lance `claude --resume <id>` dans le bon dossier.
 - La synchro copie sessions, sous-agents, mémoire de projet et checkpoints de fichiers
-  dans `<dossier partagé>/claude-legend/`, en remplaçant les chemins propres à chaque PC
+  vers la destination choisie, en remplaçant les chemins propres à chaque PC
   (`/home/kb/...` ↔ `C:\Users\kb\...`) par des marqueurs.
 - Un projet est reconnu d'un PC à l'autre par son remote git (sinon par le nom du dossier).
   Si un projet n'est pas encore associé sur un PC, l'app demande où il se trouve.
@@ -19,6 +20,19 @@ et synchronise les conversations entre tes PC via un dossier partagé (Syncthing
   dans le dossier `conflicts/` des données de l'app.
 
 Le code des projets n'est pas synchronisé : utilise git pour ça.
+
+### Destinations de synchronisation
+
+| Type | Exemple | Remarques |
+| --- | --- | --- |
+| Dossier synchronisé | `~/Sync` | Synchronisé par un autre outil (Syncthing, client Nextcloud, OneDrive…). Les données sont dans `<dossier>/claude-legend/`. |
+| SFTP | `nas.local:22`, dossier `claude-legend` | Mot de passe, clé privée ou agent SSH. L'empreinte du serveur est affichée à la première connexion et vérifiée ensuite. |
+| FTP / FTPS | `ftp.exemple.fr:21` | Cocher « FTPS » pour chiffrer (AUTH TLS, certificats du système). |
+| WebDAV | `https://cloud.exemple.fr/remote.php/dav/files/moi/claude-legend` | Nextcloud, ownCloud, NAS Synology/QNAP… Utilise un mot de passe d'application si le compte a la double authentification. |
+
+Les mots de passe sont conservés dans le trousseau du système (Secret Service sous Linux,
+Gestionnaire d'identifiants sous Windows), jamais dans les fichiers de réglages.
+« Tester la connexion » vérifie l'accès en lecture et en écriture.
 
 ## Raccourcis
 
