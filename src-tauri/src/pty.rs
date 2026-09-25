@@ -83,13 +83,24 @@ impl PtyManager {
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        // Inherited when the app itself is started from a terminal or from
-        // Claude Code, and would make `claude` misdetect its environment.
+        // Inherited when the app itself is started from a terminal or from a
+        // Claude Code session. These describe the parent session and would
+        // make `claude` misdetect its environment, e.g. CLAUDE_CODE_CHILD_SESSION
+        // turns transcript saving off. User configuration (CLAUDE_CODE_USE_*,
+        // …) is left untouched.
         for var in [
             "TERM_PROGRAM",
             "TERM_PROGRAM_VERSION",
             "CLAUDECODE",
             "CLAUDE_CODE_ENTRYPOINT",
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDE_CODE_EXECPATH",
+            "CLAUDE_CODE_MESSAGING_SOCKET",
+            "CLAUDE_CODE_MESSAGING_TOKEN",
+            "CLAUDE_CODE_SESSION_ATTENDED",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_EFFORT",
+            "CLAUDE_PID",
         ] {
             cmd.env_remove(var);
         }
