@@ -19,9 +19,12 @@ pub struct LocalSession {
     pub updated_at: u64,
 }
 
+/// Parsed session keyed by file, with the mtime and size it was parsed at.
+type ParseCache = HashMap<PathBuf, (u64, u64, Option<LocalSession>)>;
+
 #[derive(Default)]
 pub struct SessionIndex {
-    cache: Mutex<HashMap<PathBuf, (u64, u64, Option<LocalSession>)>>,
+    cache: Mutex<ParseCache>,
     project_keys: Mutex<HashMap<String, ProjectIdentity>>,
 }
 
@@ -132,7 +135,8 @@ impl SessionIndex {
                 };
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) == Some("jsonl") && path.is_file() {
+                    if path.extension().and_then(|e| e.to_str()) == Some("jsonl") && path.is_file()
+                    {
                         files.push(path);
                     }
                 }
@@ -154,7 +158,7 @@ impl SessionIndex {
                 sessions.push(session.clone());
             }
         }
-        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
         sessions
     }
 

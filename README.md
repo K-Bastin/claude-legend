@@ -40,8 +40,8 @@ Glisser-déposer un fichier dans le terminal insère son chemin.
 npm install
 npm run tauri dev      # lancer en dev
 npm run tauri build    # paquets .deb / .rpm / AppImage (Linux)
-cd src-tauri && cargo test
+npm test               # tests Rust
 ```
 
-Les paquets Windows (.msi / .exe) se construisent sur Windows ou via le workflow
-GitHub Actions `.github/workflows/build.yml` (push d'un tag `v*` ou lancement manuel).
+Branches, conventions de commit et procédure de release : voir [CONTRIBUTING.md](CONTRIBUTING.md).
+Les paquets Windows (.msi / .exe) sont produits par le workflow `release` lors d'un tag `vX.Y.Z` sur `main`.

@@ -74,24 +74,23 @@ impl PtyManager {
         program: &Path,
         args: &[String],
         cwd: &Path,
-        cols: u16,
-        rows: u16,
+        size: PtySize,
         channel: Channel<PtyEvent>,
         on_exit: impl FnOnce(u32) + Send + 'static,
     ) -> anyhow::Result<u32> {
-        let pair = native_pty_system().openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
+        let pair = native_pty_system().openpty(size)?;
         let mut cmd = build_command(program, args);
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         // Inherited when the app itself is started from a terminal or from
         // Claude Code, and would make `claude` misdetect its environment.
-        for var in ["TERM_PROGRAM", "TERM_PROGRAM_VERSION", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"] {
+        for var in [
+            "TERM_PROGRAM",
+            "TERM_PROGRAM_VERSION",
+            "CLAUDECODE",
+            "CLAUDE_CODE_ENTRYPOINT",
+        ] {
             cmd.env_remove(var);
         }
 

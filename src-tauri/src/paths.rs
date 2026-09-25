@@ -148,7 +148,10 @@ mod tests {
         );
         let win = localize(&neutral, r"C:\Users\kb\dev\app", r"C:\Users\kb", true);
         assert!(win.contains(r#""cwd":"C:\\Users\\kb\\dev\\app""#));
-        assert_eq!(neutralize(&win, r"C:\Users\kb\dev\app", r"C:\Users\kb", true), neutral);
+        assert_eq!(
+            neutralize(&win, r"C:\Users\kb\dev\app", r"C:\Users\kb", true),
+            neutral
+        );
     }
 
     #[test]
