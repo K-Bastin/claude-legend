@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Claude Legend</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <header class="brand">
+          <span class="logo">✻</span>
+          <span class="name">Claude Legend</span>
+          <span class="spacer"></span>
+          <button id="btn-new" class="icon" title="Nouvelle session (Ctrl+Shift+T)">＋</button>
+          <button id="btn-sync" class="icon" title="Synchroniser maintenant">⟳</button>
+          <button id="btn-settings" class="icon" title="Réglages">⚙</button>
+        </header>
+        <input id="search" type="search" placeholder="Rechercher une conversation…" autocomplete="off" />
+        <div id="session-list"></div>
+        <footer id="status"></footer>
+      </aside>
+      <main id="main">
+        <nav id="tabs"></nav>
+        <div id="terminals"></div>
+        <div id="welcome">
+          <div class="welcome-box">
+            <div class="big-logo">✻</div>
+            <h1>Claude Legend</h1>
+            <p>Reprends une conversation dans la liste de gauche,<br />ou démarre une nouvelle session dans un dossier.</p>
+            <button id="btn-new-welcome" class="primary">Nouvelle session…</button>
+            <p id="welcome-warning" class="warning"></p>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <dialog id="settings-dialog">
+      <form method="dialog" id="settings-form">
+        <h2>Réglages</h2>
+        <label>Dossier de synchronisation
+          <span class="row">
+            <input name="syncDir" placeholder="ex. ~/Sync (Syncthing, Nextcloud, OneDrive…)" />
+            <button type="button" id="pick-sync-dir">Parcourir…</button>
+          </span>
+          <small>Le même dossier synchronisé sur tous tes PC. Vide = synchronisation désactivée.</small>
+        </label>
+        <label>Nom de ce PC
+          <input name="machineName" required />
+        </label>
+        <label>Exécutable Claude
+          <input name="claudePath" placeholder="détection automatique" />
+          <small id="claude-detected"></small>
+        </label>
+        <label>Arguments supplémentaires
+          <input name="extraArgs" placeholder="ex. --model opus" />
+        </label>
+        <div class="row">
+          <label>Taille de police
+            <input name="fontSize" type="number" min="8" max="32" />
+          </label>
+          <label>Synchro toutes les (s)
+            <input name="syncIntervalSecs" type="number" min="15" max="3600" />
+          </label>
+        </div>
+        <menu>
+          <button value="cancel" formnovalidate>Annuler</button>
+          <button value="save" class="primary">Enregistrer</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="confirm-dialog">
+      <form method="dialog">
+        <p id="confirm-message"></p>
+        <menu id="confirm-buttons"></menu>
+      </form>
+    </dialog>
+
+    <div id="toasts"></div>
+  </body>
+</html>
