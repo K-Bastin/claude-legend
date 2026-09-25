@@ -43,6 +43,13 @@ npm run typecheck      # vérification TypeScript
 npm test               # tests Rust
 ```
 
+> **Ne travaille pas avec Claude dans l'instance lancée par `npm run tauri dev`.**
+> `tauri dev` recompile et relance l'application à chaque modification de `src-tauri/`,
+> ce qui coupe les sessions ouvertes (elles sont rouvertes au redémarrage, mais la commande
+> en cours est perdue). Pour tes sessions de travail, utilise la version installée, ou
+> `npm run dev:no-watch`, qui ne relance pas l'application : ferme-la et relance-la toi-même
+> pour prendre en compte une modification Rust.
+
 Le hook `pre-commit` lance `npm run typecheck` et `cargo fmt --check`.
 Avant d'ouvrir une PR, vérifie aussi `cargo clippy --all-targets -- -D warnings` dans `src-tauri/`.
 

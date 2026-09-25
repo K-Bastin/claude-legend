@@ -11,7 +11,8 @@
     "prepare": "husky",
     "typecheck": "tsc --noEmit",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
-    "version:set": "node scripts/set-version.mjs"
+    "version:set": "node scripts/set-version.mjs",
+    "dev:no-watch": "tauri dev --no-watch"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
