@@ -95,6 +95,10 @@ let syncing = false;
 const tabs: Tab[] = [];
 let activeTab: Tab | null = null;
 let tabSeq = 0;
+let layout: LayoutId = "1";
+/** Tab shown in each pane of the current layout. */
+let panes: (Tab | null)[] = [null];
+let activePane = 0;
 /** Set once the window is closing: sessions stopped by the shutdown must still be restored. */
 let shuttingDown = false;
 
@@ -105,7 +109,22 @@ interface SavedTab {
   cwd: string;
   title: string;
   active: boolean;
+  /** Pane the tab was shown in, if any. */
+  pane?: number | null;
 }
+
+type LayoutId = "1" | "2v" | "2h" | "3" | "4";
+
+const LAYOUT_KEY = "claude-legend:layout";
+
+/** Rectangles drawn in a 16×12 box for each layout button. */
+const LAYOUTS: { id: LayoutId; panes: number; label: string; rects: [number, number, number, number][] }[] = [
+  { id: "1", panes: 1, label: "Un seul panneau", rects: [[1, 1, 14, 10]] },
+  { id: "2v", panes: 2, label: "Deux panneaux côte à côte", rects: [[1, 1, 6.5, 10], [8.5, 1, 6.5, 10]] },
+  { id: "2h", panes: 2, label: "Deux panneaux l'un sur l'autre", rects: [[1, 1, 14, 4.5], [1, 6.5, 14, 4.5]] },
+  { id: "3", panes: 3, label: "Trois panneaux", rects: [[1, 1, 6.5, 10], [8.5, 1, 6.5, 4.5], [8.5, 6.5, 6.5, 4.5]] },
+  { id: "4", panes: 4, label: "Quatre panneaux", rects: [[1, 1, 6.5, 4.5], [8.5, 1, 6.5, 4.5], [1, 6.5, 6.5, 4.5], [8.5, 6.5, 6.5, 4.5]] },
+];
 
 // ---------- helpers ----------
 
@@ -231,6 +250,12 @@ function renderSessions() {
         el("div", { className: "meta", textContent: meta }),
       );
       item.onclick = () => resumeSession(s);
+      makeDraggable(item, () => s.title, (pane) => {
+        const open = tabs.find((t) => t.sessionId === s.id);
+        if (open) return showInPane(open, pane);
+        activePane = pane;
+        resumeSession(s);
+      });
       return item;
     });
     nodes.push(el("div", { className: "project" }, header, ...items));
@@ -331,7 +356,7 @@ function createTab(title: string, cwd: string, sessionId: string | null): Tab {
   term.unicode.activeVersion = "11";
 
   const container = el("div", { className: "term" });
-  $("#terminals").append(container);
+  $("#term-holder").append(container);
   term.open(container);
 
   const tabEl = el("div", { className: "tab" });
@@ -350,6 +375,7 @@ function createTab(title: string, cwd: string, sessionId: string | null): Tab {
   };
   tabEl.onclick = () => activateTab(tab);
   tabEl.onauxclick = (e) => e.button === 1 && closeTab(tab);
+  makeDraggable(tabEl, () => tab.title, (pane) => showInPane(tab, pane));
   $("#tabs").append(tabEl);
   renderTab(tab);
 
@@ -372,7 +398,8 @@ function createTab(title: string, cwd: string, sessionId: string | null): Tab {
     }
   });
   new ResizeObserver(() => {
-    if (container.classList.contains("active")) fit.fit();
+    // Terminals parked in the hidden holder have no size to fit to.
+    if (container.offsetParent !== null) fit.fit();
   }).observe(container);
 
   tabs.push(tab);
@@ -389,26 +416,22 @@ function renderTab(tab: Tab) {
   tab.tabEl.className = `tab${tab === activeTab ? " active" : ""}${tab.exited ? " exited" : ""}`;
   saveOpenTabs();
   tab.tabEl.title = `${tab.title}\n${tab.cwd}`;
+  const pane = panes.indexOf(tab);
+  const badge = panes.length > 1 && pane !== -1 ? el("span", { className: "pane-badge", textContent: String(pane + 1) }) : null;
   tab.tabEl.replaceChildren(
-    ...[tab.activity ? el("span", { className: "activity" }) : null, el("span", { className: "t", textContent: tab.title }), close].filter(
+    ...[badge, tab.activity ? el("span", { className: "activity" }) : null, el("span", { className: "t", textContent: tab.title }), close].filter(
       (n): n is HTMLElement => n !== null,
     ),
   );
+  const header = document.querySelectorAll<HTMLElement>("#terminals > .pane .pane-header .t")[pane];
+  if (header) header.textContent = tab.title;
 }
 
+/** Focuses the tab's pane, or shows the tab in the focused pane. */
 function activateTab(tab: Tab) {
-  activeTab = tab;
-  tab.activity = false;
-  for (const t of tabs) {
-    t.el.classList.toggle("active", t === tab);
-    renderTab(t);
-  }
-  $("#welcome").classList.add("hidden");
-  requestAnimationFrame(() => {
-    tab.fit.fit();
-    tab.term.focus();
-  });
-  renderSessions();
+  const pane = panes.indexOf(tab);
+  if (pane !== -1) focusPane(pane);
+  else showInPane(tab, activePane);
 }
 
 function closeTab(tab: Tab) {
@@ -417,14 +440,159 @@ function closeTab(tab: Tab) {
   tab.el.remove();
   tab.tabEl.remove();
   tabs.splice(tabs.indexOf(tab), 1);
-  saveOpenTabs();
-  if (activeTab === tab) {
-    activeTab = null;
-    const next = tabs[tabs.length - 1];
-    if (next) activateTab(next);
-    else $("#welcome").classList.remove("hidden");
-  }
+  const pane = panes.indexOf(tab);
+  if (pane !== -1) panes[pane] = nextHiddenTab();
+  renderPanes();
+  focusPane(activePane);
+}
+
+// ---------- panes ----------
+
+function nextHiddenTab(): Tab | null {
+  return [...tabs].reverse().find((t) => !panes.includes(t)) ?? null;
+}
+
+function layoutPaneCount(id: LayoutId): number {
+  return LAYOUTS.find((l) => l.id === id)?.panes ?? 1;
+}
+
+/** Rebuilds the pane grid and puts every terminal in its pane or in the hidden holder. */
+function renderPanes() {
+  const split = panes.length > 1;
+  const nodes = panes.map((tab, i) => {
+    const body = el("div", { className: "pane-body" });
+    if (tab) {
+      body.append(tab.el);
+    } else {
+      const button = el("button", { textContent: "Nouvelle session…" });
+      button.onclick = () => {
+        focusPane(i, false);
+        startNewSession();
+      };
+      body.append(
+        el(
+          "div",
+          { className: "pane-empty" },
+          el("p", { textContent: "Choisis une conversation dans la liste, clique sur un onglet, ou glisse-le ici." }),
+          button,
+        ),
+      );
+    }
+    const header = split
+      ? el(
+          "div",
+          { className: "pane-header" },
+          el("span", { className: "pane-num", textContent: String(i + 1) }),
+          el("span", { className: "t", textContent: tab?.title ?? "Panneau vide" }),
+        )
+      : null;
+    const pane = el("div", { className: "pane" }, header, body);
+    pane.addEventListener("mousedown", () => activePane !== i && focusPane(i, false));
+    pane.addEventListener("focusin", () => activePane !== i && focusPane(i, false));
+    return pane;
+  });
+  const holder = $("#term-holder");
+  for (const t of tabs) if (!panes.includes(t)) holder.append(t.el);
+  const grid = $("#terminals");
+  grid.className = `layout-${layout}`;
+  grid.replaceChildren(...nodes);
+  $("#welcome").classList.toggle("hidden", tabs.length > 0);
+  $("#tabbar").classList.toggle("hidden", tabs.length === 0);
+  requestAnimationFrame(() => panes.forEach((t) => t?.fit.fit()));
+}
+
+function focusPane(index: number, focusTerminal = true) {
+  activePane = Math.min(index, panes.length - 1);
+  activeTab = panes[activePane] ?? null;
+  if (activeTab) activeTab.activity = false;
+  document
+    .querySelectorAll("#terminals > .pane")
+    .forEach((p, i) => p.classList.toggle("focused", panes.length > 1 && i === activePane));
+  tabs.forEach(renderTab);
+  const tab = activeTab;
+  if (focusTerminal && tab) requestAnimationFrame(() => tab.term.focus());
   renderSessions();
+}
+
+/** Shows a tab in a pane; if it was already visible elsewhere the two panes swap. */
+function showInPane(tab: Tab, index: number) {
+  const from = panes.indexOf(tab);
+  if (from !== -1 && from !== index) panes[from] = panes[index];
+  panes[index] = tab;
+  renderPanes();
+  focusPane(index);
+}
+
+function setLayout(id: LayoutId) {
+  const count = layoutPaneCount(id);
+  const keep = activeTab;
+  layout = id;
+  panes = Array.from({ length: count }, (_, i) => panes[i] ?? null);
+  activePane = Math.min(activePane, count - 1);
+  if (keep && !panes.includes(keep)) panes[activePane] = keep;
+  for (let i = 0; i < count; i++) panes[i] ??= nextHiddenTab();
+  try {
+    localStorage.setItem(LAYOUT_KEY, id);
+  } catch {
+    // Layout just won't be remembered.
+  }
+  renderLayoutPicker();
+  renderPanes();
+  focusPane(activePane);
+}
+
+function renderLayoutPicker() {
+  $("#layouts").replaceChildren(
+    ...LAYOUTS.map((l) => {
+      const button = el("button", { className: l.id === layout ? "on" : "", title: l.label });
+      button.innerHTML = `<svg width="16" height="12" viewBox="0 0 16 12" aria-hidden="true">${l.rects
+        .map(([x, y, w, h]) => `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="1"/>`)
+        .join("")}</svg>`;
+      button.onclick = () => setLayout(l.id);
+      return button;
+    }),
+  );
+}
+
+function paneAt(x: number, y: number): number {
+  const pane = document.elementFromPoint(x, y)?.closest("#terminals > .pane");
+  return pane ? [...$("#terminals").children].indexOf(pane) : -1;
+}
+
+/**
+ * Mouse-driven drag towards a pane. HTML5 drag and drop is not used because
+ * Tauri intercepts it on Windows for file drops.
+ */
+function makeDraggable(handle: HTMLElement, label: () => string, onDrop: (pane: number) => void) {
+  handle.addEventListener("mousedown", (down) => {
+    if (down.button !== 0) return;
+    let ghost: HTMLElement | null = null;
+    const highlight = (index: number) =>
+      document.querySelectorAll("#terminals > .pane").forEach((p, i) => p.classList.toggle("drop-target", i === index));
+    const move = (e: MouseEvent) => {
+      if (!ghost) {
+        if (Math.hypot(e.clientX - down.clientX, e.clientY - down.clientY) < 6) return;
+        ghost = el("div", { className: "drag-ghost", textContent: label() });
+        document.body.append(ghost);
+        document.body.classList.add("dragging");
+      }
+      ghost.style.left = `${e.clientX + 12}px`;
+      ghost.style.top = `${e.clientY + 12}px`;
+      highlight(paneAt(e.clientX, e.clientY));
+    };
+    const up = (e: MouseEvent) => {
+      removeEventListener("mousemove", move);
+      removeEventListener("mouseup", up, true);
+      if (!ghost) return;
+      ghost.remove();
+      document.body.classList.remove("dragging");
+      highlight(-1);
+      const pane = paneAt(e.clientX, e.clientY);
+      if (pane !== -1) onDrop(pane);
+    };
+    addEventListener("mousemove", move);
+    addEventListener("mouseup", up, true);
+  });
 }
 
 async function launch(tab: Tab, sessionId: string | null): Promise<boolean> {
@@ -432,7 +600,7 @@ async function launch(tab: Tab, sessionId: string | null): Promise<boolean> {
   channel.onmessage = (event) => {
     if (event.kind === "data") {
       tab.term.write(event.data);
-      if (tab !== activeTab && !tab.activity) {
+      if (!panes.includes(tab) && !tab.activity) {
         tab.activity = true;
         renderTab(tab);
       }
@@ -471,7 +639,13 @@ function saveOpenTabs() {
   if (shuttingDown) return;
   const saved: SavedTab[] = tabs
     .filter((t) => t.sessionId && !t.exited)
-    .map((t) => ({ sessionId: t.sessionId!, cwd: t.cwd, title: t.title, active: t === activeTab }));
+    .map((t) => ({
+      sessionId: t.sessionId!,
+      cwd: t.cwd,
+      title: t.title,
+      active: t === activeTab,
+      pane: panes.includes(t) ? panes.indexOf(t) : null,
+    }));
   try {
     localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(saved));
   } catch {
@@ -492,14 +666,24 @@ async function restoreTabs() {
   // Sessions with no prompt yet have no file to resume from.
   const resumable = new Set(sessions.filter((s) => s.location === "local").map((s) => s.id));
   let active: Tab | null = null;
+  const placed: [Tab, number | null | undefined][] = [];
   for (const saved of loadSavedTabs()) {
     if (!resumable.has(saved.sessionId) || tabs.some((t) => t.sessionId === saved.sessionId)) continue;
     const tab = createTab(saved.title, saved.cwd, saved.sessionId);
     tab.term.write("\x1b[2m[Session rouverte après le redémarrage de Claude Legend]\x1b[0m\r\n");
+    placed.push([tab, saved.pane]);
     await launch(tab, saved.sessionId);
     if (saved.active) active = tab;
   }
-  if (active) activateTab(active);
+  if (placed.length) {
+    panes = panes.map(() => null);
+    for (const [tab, pane] of placed) if (pane != null && pane < panes.length && !panes[pane]) panes[pane] = tab;
+    for (let i = 0; i < panes.length; i++) panes[i] ??= nextHiddenTab();
+    renderPanes();
+    const activeIndex = active ? panes.indexOf(active) : -1;
+    if (active && activeIndex === -1) showInPane(active, activePane);
+    else focusPane(Math.max(activeIndex, 0));
+  }
   saveOpenTabs();
 }
 
@@ -544,9 +728,22 @@ async function startNewSession(cwd?: string) {
   setTimeout(refreshSessions, 3000);
 }
 
+/** Ctrl+Alt+1..4 focuses a pane. Uses the physical key so it works on AZERTY too. */
+function handlePaneShortcut(e: KeyboardEvent): boolean {
+  const match = /^Digit([1-4])$/.exec(e.code);
+  if (!match || !e.ctrlKey || !e.altKey) return false;
+  const index = Number(match[1]) - 1;
+  if (index < panes.length) focusPane(index);
+  return true;
+}
+
 /** Returns false to stop xterm from handling the key. */
 function handleKey(tab: Tab, e: KeyboardEvent): boolean {
   if (e.type !== "keydown") return true;
+  if (handlePaneShortcut(e)) {
+    e.preventDefault();
+    return false;
+  }
   const ctrl = e.ctrlKey || e.metaKey;
   const key = e.key.toLowerCase();
 
@@ -686,6 +883,7 @@ async function boot() {
   });
 
   document.addEventListener("keydown", (e) => {
+    if (handlePaneShortcut(e)) return e.preventDefault();
     const ctrl = e.ctrlKey || e.metaKey;
     if (ctrl && e.shiftKey && e.key.toLowerCase() === "t") {
       e.preventDefault();
@@ -718,6 +916,17 @@ async function boot() {
   window.addEventListener("focus", () => refreshSessions());
   setInterval(refreshSessions, 20000);
   setInterval(() => renderSessions(), 60000);
+
+  let savedLayout: string | null = null;
+  try {
+    savedLayout = localStorage.getItem(LAYOUT_KEY);
+  } catch {
+    // Default layout.
+  }
+  layout = LAYOUTS.some((l) => l.id === savedLayout) ? (savedLayout as LayoutId) : "1";
+  panes = Array.from({ length: layoutPaneCount(layout) }, () => null);
+  renderLayoutPicker();
+  renderPanes();
 
   await refreshSessions();
   await restoreTabs();
