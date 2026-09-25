@@ -153,7 +153,10 @@ impl<'a> Syncer<'a> {
 
     pub fn register_machine(&self) -> anyhow::Result<()> {
         save_json(
-            &self.root.join("machines").join(format!("{}.json", self.machine.id)),
+            &self
+                .root
+                .join("machines")
+                .join(format!("{}.json", self.machine.id)),
             &MachineInfo {
                 id: self.machine.id.clone(),
                 name: self.machine_name.to_string(),
@@ -187,8 +190,17 @@ impl<'a> Syncer<'a> {
             )?;
         }
         let mapping_file = dir.join("paths").join(format!("{}.json", self.machine.id));
-        if load_json::<PathMapping>(&mapping_file).map(|m| m.path).as_deref() != Some(path) {
-            save_json(&mapping_file, &PathMapping { path: path.to_string() })?;
+        if load_json::<PathMapping>(&mapping_file)
+            .map(|m| m.path)
+            .as_deref()
+            != Some(path)
+        {
+            save_json(
+                &mapping_file,
+                &PathMapping {
+                    path: path.to_string(),
+                },
+            )?;
         }
         Ok(())
     }
@@ -266,7 +278,9 @@ impl<'a> Syncer<'a> {
         };
         let mut state = self.load_state();
         if let Err(e) = self.register_machine() {
-            report.errors.push(format!("Dossier de synchro inaccessible : {e}"));
+            report
+                .errors
+                .push(format!("Dossier de synchro inaccessible : {e}"));
             return report;
         }
 
@@ -290,7 +304,9 @@ impl<'a> Syncer<'a> {
                 }
                 match self.pull(&project.key, &meta, &local_root) {
                     Ok(true) => {
-                        state.hashes.insert(format!("s:{}", meta.id), meta.hash.clone());
+                        state
+                            .hashes
+                            .insert(format!("s:{}", meta.id), meta.hash.clone());
                         report.pulled += 1;
                     }
                     Ok(false) => {}
@@ -326,7 +342,11 @@ impl<'a> Syncer<'a> {
         } else {
             for (project, mapping) in self.projects() {
                 let Some(local_root) = mapping else { continue };
-                if let Some(meta) = self.remote_sessions(&project.key).into_iter().find(|m| m.id == id) {
+                if let Some(meta) = self
+                    .remote_sessions(&project.key)
+                    .into_iter()
+                    .find(|m| m.id == id)
+                {
                     match self.pull(&project.key, &meta, &local_root) {
                         Ok(true) => {
                             state.hashes.insert(format!("s:{id}"), meta.hash.clone());
@@ -358,9 +378,17 @@ impl<'a> Syncer<'a> {
         let key = &identity.key;
         let state_key = format!("s:{}", session.id);
         let home = home();
-        let local_neutral = neutralize(&read_complete_lines(&session.path)?, &session.cwd, &home, true);
+        let local_neutral = neutralize(
+            &read_complete_lines(&session.path)?,
+            &session.cwd,
+            &home,
+            true,
+        );
         let local_hash = sha(&local_neutral);
-        let meta_path = self.project_dir(key).join("sessions").join(format!("{}.meta.json", session.id));
+        let meta_path = self
+            .project_dir(key)
+            .join("sessions")
+            .join(format!("{}.meta.json", session.id));
         let remote: Option<RemoteMeta> = load_json(&meta_path);
         let base = state.hashes.get(&state_key).cloned();
 
@@ -385,17 +413,24 @@ impl<'a> Syncer<'a> {
         } else {
             // Both sides moved. Sessions are append-only logs, so when one
             // contains the other the longer one is simply more recent.
-            let remote_text = std::fs::read_to_string(meta_path.with_file_name(format!("{}.jsonl", session.id)))?;
+            let remote_text =
+                std::fs::read_to_string(meta_path.with_file_name(format!("{}.jsonl", session.id)))?;
             if remote_text.starts_with(&local_neutral) {
                 false
             } else if local_neutral.starts_with(&remote_text) {
                 true
             } else {
                 let push = open_here || session.updated_at >= remote.updated_at;
-                let (loser, side) = if push { (&remote_text, "distant") } else { (&local_neutral, "local") };
-                let backup = self
-                    .conflicts_dir
-                    .join(format!("{}-{}-{side}.jsonl", session.id, paths::now_ms()));
+                let (loser, side) = if push {
+                    (&remote_text, "distant")
+                } else {
+                    (&local_neutral, "local")
+                };
+                let backup = self.conflicts_dir.join(format!(
+                    "{}-{}-{side}.jsonl",
+                    session.id,
+                    paths::now_ms()
+                ));
                 write_atomic(&backup, loser.as_bytes())?;
                 report.conflicts.push(format!(
                     "« {} » modifiée sur deux PC, version {side} sauvegardée dans {}",
@@ -417,9 +452,18 @@ impl<'a> Syncer<'a> {
         Ok(())
     }
 
-    fn push(&self, key: &str, session: &LocalSession, neutral: &str, hash: &str) -> anyhow::Result<()> {
+    fn push(
+        &self,
+        key: &str,
+        session: &LocalSession,
+        neutral: &str,
+        hash: &str,
+    ) -> anyhow::Result<()> {
         let dir = self.project_dir(key).join("sessions");
-        write_atomic(&dir.join(format!("{}.jsonl", session.id)), neutral.as_bytes())?;
+        write_atomic(
+            &dir.join(format!("{}.jsonl", session.id)),
+            neutral.as_bytes(),
+        )?;
         save_json(
             &dir.join(format!("{}.meta.json", session.id)),
             &RemoteMeta {
@@ -437,7 +481,9 @@ impl<'a> Syncer<'a> {
         )?;
         let home = home();
         let local_extra = session.path.with_extension("");
-        mirror(&local_extra, &dir.join(&session.id), |text| neutralize(text, &session.cwd, &home, true));
+        mirror(&local_extra, &dir.join(&session.id), |text| {
+            neutralize(text, &session.cwd, &home, true)
+        });
         mirror(
             &paths::file_history_dir().join(&session.id),
             &self.root.join("file-history").join(&session.id),
@@ -457,7 +503,10 @@ impl<'a> Syncer<'a> {
         let home = home();
         let project_dir = paths::local_project_dir(local_root);
         let target = project_dir.join(format!("{}.jsonl", meta.id));
-        write_atomic(&target, localize(&neutral, local_root, &home, true).as_bytes())?;
+        write_atomic(
+            &target,
+            localize(&neutral, local_root, &home, true).as_bytes(),
+        )?;
         mirror(&dir.join(&meta.id), &project_dir.join(&meta.id), |text| {
             localize(text, local_root, &home, true)
         });
@@ -471,7 +520,13 @@ impl<'a> Syncer<'a> {
 
     // ---------- memory ----------
 
-    fn sync_memory(&self, key: &str, local_root: &str, state: &mut SyncState, report: &mut SyncReport) {
+    fn sync_memory(
+        &self,
+        key: &str,
+        local_root: &str,
+        state: &mut SyncState,
+        report: &mut SyncReport,
+    ) {
         let home = home();
         let local_dir = paths::local_project_dir(local_root).join("memory");
         let remote_dir = self.project_dir(key).join("memory");
@@ -526,7 +581,9 @@ impl<'a> Syncer<'a> {
             match result {
                 Ok(()) if push => report.pushed += 1,
                 Ok(()) => report.pulled += 1,
-                Err(e) => report.errors.push(format!("Mémoire {} : {e}", rel.display())),
+                Err(e) => report
+                    .errors
+                    .push(format!("Mémoire {} : {e}", rel.display())),
             }
         }
     }
@@ -536,7 +593,9 @@ impl<'a> Syncer<'a> {
 /// Text files go through `transform` (path placeholders).
 fn mirror(src: &Path, dst: &Path, transform: impl Fn(&str) -> String) {
     for file in walk_files(src) {
-        let Ok(rel) = file.strip_prefix(src) else { continue };
+        let Ok(rel) = file.strip_prefix(src) else {
+            continue;
+        };
         let target = dst.join(rel);
         if target.exists() && paths::mtime_ms(&target) >= paths::mtime_ms(&file) {
             continue;
@@ -561,7 +620,13 @@ mod tests {
     use super::*;
     use crate::sessions::SessionIndex;
 
-    fn syncer<'a>(root: &Path, machine: &'a Machine, name: &'a str, data: &Path, index: &'a SessionIndex) -> Syncer<'a> {
+    fn syncer<'a>(
+        root: &Path,
+        machine: &'a Machine,
+        name: &'a str,
+        data: &Path,
+        index: &'a SessionIndex,
+    ) -> Syncer<'a> {
         Syncer {
             root: root.to_path_buf(),
             machine,
@@ -590,7 +655,10 @@ mod tests {
         for d in [&proj_a, &proj_b] {
             std::fs::create_dir_all(d).unwrap();
         }
-        let (pa, pb) = (proj_a.to_string_lossy().to_string(), proj_b.to_string_lossy().to_string());
+        let (pa, pb) = (
+            proj_a.to_string_lossy().to_string(),
+            proj_b.to_string_lossy().to_string(),
+        );
         let id = "11111111-2222-3333-4444-555555555555";
 
         // Machine A writes a session.
@@ -599,7 +667,11 @@ mod tests {
         std::fs::create_dir_all(file_a.parent().unwrap()).unwrap();
         std::fs::write(&file_a, line(&pa, &format!("lis {pa}/src/main.rs"))).unwrap();
         std::fs::create_dir_all(paths::local_project_dir(&pa).join("memory")).unwrap();
-        std::fs::write(paths::local_project_dir(&pa).join("memory/MEMORY.md"), format!("projet dans {pa}")).unwrap();
+        std::fs::write(
+            paths::local_project_dir(&pa).join("memory/MEMORY.md"),
+            format!("projet dans {pa}"),
+        )
+        .unwrap();
         let (ma, mb) = (Machine { id: "A".into() }, Machine { id: "B".into() });
         let index_a = SessionIndex::default();
         let report = syncer(&shared, &ma, "pc-a", &tmp.join("data-a"), &index_a).sync_all();
@@ -617,14 +689,22 @@ mod tests {
         assert_eq!(report.errors, Vec::<String>::new());
         let file_b = paths::local_project_dir(&pb).join(format!("{id}.jsonl"));
         let imported = std::fs::read_to_string(&file_b).unwrap();
-        assert!(imported.contains(&format!("\"cwd\":\"{pb}\"")), "{imported}");
+        assert!(
+            imported.contains(&format!("\"cwd\":\"{pb}\"")),
+            "{imported}"
+        );
         assert!(imported.contains(&format!("lis {pb}/src/main.rs")));
-        let memory = std::fs::read_to_string(paths::local_project_dir(&pb).join("memory/MEMORY.md")).unwrap();
+        let memory =
+            std::fs::read_to_string(paths::local_project_dir(&pb).join("memory/MEMORY.md"))
+                .unwrap();
         assert_eq!(memory, format!("projet dans {pb}"));
 
         // B continues the conversation; a second sync is a no-op.
         std::thread::sleep(std::time::Duration::from_millis(20));
-        let mut f = std::fs::OpenOptions::new().append(true).open(&file_b).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&file_b)
+            .unwrap();
         std::io::Write::write_all(&mut f, line(&pb, "suite sur B").as_bytes()).unwrap();
         let report = sb.sync_all();
         assert_eq!((report.pushed, report.pulled), (1, 0));
@@ -649,7 +729,12 @@ mod tests {
         std::env::set_var("CLAUDE_CONFIG_DIR", &home_a);
         let report = syncer(&shared, &ma, "pc-a", &tmp.join("data-a"), &index_a).sync_all();
         assert_eq!(report.conflicts.len(), 1, "{report:?}");
-        assert_eq!(std::fs::read_dir(tmp.join("data-a/conflicts")).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(tmp.join("data-a/conflicts"))
+                .unwrap()
+                .count(),
+            1
+        );
 
         // Locks.
         let sa = syncer(&shared, &ma, "pc-a", &tmp.join("data-a"), &index_a);

@@ -5,6 +5,7 @@ mod sessions;
 mod sync;
 
 use config::{Machine, Settings};
+use portable_pty::PtySize;
 use pty::{PtyEvent, PtyManager};
 use serde::{Deserialize, Serialize};
 use sessions::SessionIndex;
@@ -133,7 +134,8 @@ fn list_sessions(state: State<AppState>) -> Vec<SessionEntry> {
     let mut entries: Vec<SessionEntry> = Vec::new();
     let remote_info = state.with_syncer(|s| {
         let projects = s.projects();
-        let mut remote: HashMap<String, (sync::RemoteMeta, sync::ProjectInfo, Option<String>)> = HashMap::new();
+        let mut remote: HashMap<String, (sync::RemoteMeta, sync::ProjectInfo, Option<String>)> =
+            HashMap::new();
         for (project, mapping) in &projects {
             for meta in s.remote_sessions(&project.key) {
                 remote.insert(meta.id.clone(), (meta, project.clone(), mapping.clone()));
@@ -197,7 +199,7 @@ fn list_sessions(state: State<AppState>) -> Vec<SessionEntry> {
             synced: true,
         });
     }
-    entries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    entries.sort_by_key(|e| std::cmp::Reverse(e.updated_at));
     entries
 }
 
@@ -230,13 +232,20 @@ async fn open_session(
         .map_err(err)?
 }
 
-fn open_session_blocking(app: &AppHandle, request: OpenRequest, channel: Channel<PtyEvent>) -> CmdResult<OpenResult> {
+fn open_session_blocking(
+    app: &AppHandle,
+    request: OpenRequest,
+    channel: Channel<PtyEvent>,
+) -> CmdResult<OpenResult> {
     let state = app.state::<AppState>();
     let settings = state.settings.lock().unwrap().clone();
     let claude = config::resolve_claude(&settings)?;
     let cwd = PathBuf::from(&request.cwd);
     if !cwd.is_dir() {
-        return Err(format!("Le dossier {} n'existe pas sur ce PC.", request.cwd));
+        return Err(format!(
+            "Le dossier {} n'existe pas sur ce PC.",
+            request.cwd
+        ));
     }
     let mut warnings = Vec::new();
 
@@ -266,20 +275,36 @@ fn open_session_blocking(app: &AppHandle, request: OpenRequest, channel: Channel
     let exit_app = app.clone();
     let pty_id = state
         .ptys
-        .spawn(&claude, &args, &cwd, request.cols.max(20), request.rows.max(5), channel, move |pty_id| {
-            let state = exit_app.state::<AppState>();
-            let session = state.open.lock().unwrap().remove(&pty_id);
-            if let Some(session) = session {
-                state.with_syncer(|s| {
-                    s.release_lock(&session);
-                    let _guard = state.sync_guard.lock().unwrap();
-                    s.sync_one(&session)
-                });
-            }
-            let _ = exit_app.emit("sessions-changed", ());
-        })
+        .spawn(
+            &claude,
+            &args,
+            &cwd,
+            PtySize {
+                cols: request.cols.max(20),
+                rows: request.rows.max(5),
+                pixel_width: 0,
+                pixel_height: 0,
+            },
+            channel,
+            move |pty_id| {
+                let state = exit_app.state::<AppState>();
+                let session = state.open.lock().unwrap().remove(&pty_id);
+                if let Some(session) = session {
+                    state.with_syncer(|s| {
+                        s.release_lock(&session);
+                        let _guard = state.sync_guard.lock().unwrap();
+                        s.sync_one(&session)
+                    });
+                }
+                let _ = exit_app.emit("sessions-changed", ());
+            },
+        )
         .map_err(|e| format!("Impossible de lancer Claude : {e}"))?;
-    state.open.lock().unwrap().insert(pty_id, session_id.clone());
+    state
+        .open
+        .lock()
+        .unwrap()
+        .insert(pty_id, session_id.clone());
     Ok(OpenResult {
         pty_id,
         session_id,

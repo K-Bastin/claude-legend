@@ -64,7 +64,11 @@ pub fn load_or_create_machine(config_dir: &Path) -> Machine {
 /// Desktop launchers often start apps with a minimal PATH, so common install
 /// locations are checked too.
 pub fn resolve_claude(settings: &Settings) -> Result<PathBuf, String> {
-    if let Some(path) = settings.claude_path.as_deref().filter(|p| !p.trim().is_empty()) {
+    if let Some(path) = settings
+        .claude_path
+        .as_deref()
+        .filter(|p| !p.trim().is_empty())
+    {
         let path = PathBuf::from(path.trim());
         return if path.exists() {
             Ok(path)
