@@ -47,6 +47,18 @@ fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
+fn check_project_key(key: &str) -> CmdResult<()> {
+    sessions::is_project_key(key)
+        .then_some(())
+        .ok_or_else(|| "projet invalide".into())
+}
+
+fn check_session_id(id: &str) -> CmdResult<()> {
+    sessions::is_session_id(id)
+        .then_some(())
+        .ok_or_else(|| "identifiant de session invalide".into())
+}
+
 impl AppState {
     fn open_session_ids(&self) -> HashSet<String> {
         self.open.lock().unwrap().values().cloned().collect()
@@ -214,8 +226,9 @@ async fn test_sync(target: SyncTarget, secret: Option<String>) -> CmdResult<Test
 }
 
 #[tauri::command]
-fn get_project_rules(state: State<AppState>, project_key: String) -> String {
-    rules::load(&state.data_dir, &project_key)
+fn get_project_rules(state: State<AppState>, project_key: String) -> CmdResult<String> {
+    check_project_key(&project_key)?;
+    Ok(rules::load(&state.data_dir, &project_key))
 }
 
 /// Last plan usage reported by Claude Code, if any.
@@ -237,13 +250,7 @@ fn save_project_rules(
     project_key: String,
     rules: String,
 ) -> CmdResult<()> {
-    if project_key.is_empty()
-        || !project_key
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-')
-    {
-        return Err("projet invalide".into());
-    }
+    check_project_key(&project_key)?;
     rules::save(&state.data_dir, &project_key, &rules).map_err(err)?;
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
@@ -405,6 +412,7 @@ fn open_session_blocking(
 
     let (session_id, mut args) = match &request.session_id {
         Some(id) => {
+            check_session_id(id)?;
             if let Some(report) = state.with_syncer(|s| s.sync_one(id)) {
                 warnings.extend(report.errors);
                 warnings.extend(report.conflicts);
@@ -499,6 +507,7 @@ fn pty_kill(state: State<AppState>, id: u32) {
 
 #[tauri::command]
 async fn lock_status(app: AppHandle, session_id: String) -> CmdResult<Option<LockInfo>> {
+    check_session_id(&session_id)?;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         state
@@ -523,6 +532,7 @@ async fn sync_now(app: AppHandle) -> CmdResult<Option<SyncReport>> {
 
 #[tauri::command]
 async fn map_project(app: AppHandle, project_key: String, path: String) -> CmdResult<()> {
+    check_project_key(&project_key)?;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let identity = state.index.project_identity(&path);
