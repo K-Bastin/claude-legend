@@ -11,6 +11,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { icon } from "./icons";
 import { applyTheme, loadThemeMode, onSystemThemeChange, saveThemeMode, TERMINAL_THEMES, type ThemeMode } from "./theme";
 import { fillSyncForm, missingSyncField, readSyncForm, updateSyncVisibility, type SyncTarget } from "./sync-form";
 
@@ -231,7 +232,7 @@ function renderSessions() {
   for (const [, group] of groups) {
     const first = group[0];
     const cwd = group.find((s) => s.cwd)?.cwd ?? null;
-    const addBtn = el("button", { className: "icon", textContent: "＋", title: cwd ? `Nouvelle session dans ${cwd}` : "Associer à un dossier" });
+    const addBtn = el("button", { className: "icon", innerHTML: icon("plus"), title: cwd ? `Nouvelle session dans ${cwd}` : "Associer à un dossier" });
     addBtn.onclick = (e) => {
       e.stopPropagation();
       if (cwd) startNewSession(cwd);
@@ -825,7 +826,7 @@ function refreshTheme() {
   theme = applyTheme(themeMode);
   for (const t of tabs) t.term.options.theme = TERMINAL_THEMES[theme];
   const button = $("#btn-theme");
-  button.textContent = theme === "dark" ? "☾" : "☀";
+  button.innerHTML = icon(theme === "dark" ? "moon" : "sun");
   button.title = theme === "dark" ? "Passer en thème clair" : "Passer en thème sombre";
 }
 
@@ -967,6 +968,9 @@ async function boot() {
   $("#btn-new").onclick = () => startNewSession();
   $("#btn-new-welcome").onclick = () => startNewSession();
   $("#btn-sync").onclick = syncNow;
+  $("#btn-new").innerHTML = icon("plus");
+  $("#btn-sync").innerHTML = icon("sync");
+  $("#btn-settings").innerHTML = icon("settings");
   $("#btn-settings").onclick = openSettings;
   $("#btn-theme").onclick = () => setThemeMode(theme === "dark" ? "light" : "dark");
   onSystemThemeChange(() => themeMode === "system" && refreshTheme());
