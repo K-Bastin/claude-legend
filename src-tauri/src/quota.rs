@@ -40,7 +40,8 @@ fn user_status_line(cwd: &Path) -> Option<String> {
     })
 }
 
-/// Extra `claude` arguments and environment making the relay the status line.
+/// Extra `claude` arguments and environment making the relay the status line,
+/// with the hooks behind desktop notifications (see [`crate::events`]).
 pub struct LaunchOptions {
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
@@ -53,7 +54,8 @@ pub fn launch_options(data_dir: &Path, cwd: &Path) -> anyhow::Result<LaunchOptio
             "type": "command",
             "command": format!("\"{}\" {RELAY_ARG}", exe.display()),
             "padding": 0,
-        }
+        },
+        "hooks": crate::events::hooks(&exe),
     });
     let settings_file = data_dir.join("statusline-settings.json");
     crate::paths::write_atomic(
@@ -73,6 +75,7 @@ pub fn launch_options(data_dir: &Path, cwd: &Path) -> anyhow::Result<LaunchOptio
             NEXT_COMMAND_ENV.to_string(),
             user_status_line(cwd).unwrap_or_default(),
         ),
+        crate::events::launch_env(data_dir),
     ];
     Ok(LaunchOptions { args, env })
 }

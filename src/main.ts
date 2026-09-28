@@ -12,6 +12,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { icon } from "./icons";
+import { notificationsEnabled, notify, notifyOnce, setNotificationsEnabled } from "./notifications";
 import { applyTheme, loadThemeMode, onSystemThemeChange, saveThemeMode, TERMINAL_THEMES, type ThemeMode } from "./theme";
 import { autoCheckEnabled, checkAtStartup, checkNow, setAutoCheck, updateSupport, type InstallHooks } from "./updates";
 import { fillSyncForm, missingSyncField, readSyncForm, transportWarning, updateSyncVisibility, type SyncTarget } from "./sync-form";
@@ -78,6 +79,14 @@ interface AppInfo {
   syncLabel: string;
   lastReport: SyncReport | null;
   home: string;
+}
+
+/** Left by Claude Code's hooks, see events.rs. */
+interface ClaudeEvent {
+  sessionId: string;
+  kind: "notification" | "stop";
+  message: string | null;
+  at: number;
 }
 
 type PtyEvent = { kind: "data"; data: string } | { kind: "exit"; code: number | null };
@@ -489,6 +498,33 @@ async function deleteConflict(c: Conflict) {
 async function refreshQuota() {
   quota = await invoke<typeof quota>("get_quota").catch(() => null);
   renderStatus();
+  const limits = quota?.rateLimits;
+  for (const [label, limit] of [
+    ["Session 5 h", limits?.five_hour],
+    ["Semaine", limits?.seven_day],
+  ] as const) {
+    if (!limit || limit.used_percentage < 90) continue;
+    if (limit.resets_at && limit.resets_at * 1000 <= Date.now()) continue;
+    notifyOnce(
+      `${label}:${limit.resets_at ?? ""}`,
+      "Quota Claude presque atteint",
+      `${label} : ${Math.round(limit.used_percentage)} % utilisé` + (limit.resets_at ? `, réinitialisation ${formatReset(limit.resets_at)}` : ""),
+    );
+  }
+}
+
+/** Claude waits or finished in a conversation: flag its tab, and notify when it is out of view. */
+function onClaudeEvent(event: ClaudeEvent) {
+  const tab = tabs.find((t) => t.sessionId === event.sessionId);
+  if (!tab) return;
+  const shown = panes.includes(tab);
+  if (shown && document.hasFocus()) return;
+  if (!shown && !tab.activity) {
+    tab.activity = true;
+    renderTab(tab);
+  }
+  const waiting = event.kind === "notification";
+  notify(waiting ? "Claude attend ta réponse" : "Claude a terminé", waiting && event.message ? `${tab.title}\n${event.message}` : tab.title);
 }
 
 function formatReset(seconds: number): string {
@@ -1147,6 +1183,7 @@ async function openSettings() {
   settingsField("machineName").value = settings.machineName;
   settingsField("theme").value = themeMode;
   settingsField("autoUpdateCheck").checked = autoCheckEnabled();
+  settingsField("desktopNotifications").checked = notificationsEnabled();
   $("#update-status").textContent = "";
   updateSupport()
     .then((s) => ($("#app-version").textContent = `Version installée : ${s.version}`))
@@ -1229,6 +1266,7 @@ async function saveSettingsFromForm() {
   settingsField("secret").value = "";
   setThemeMode(settingsField("theme").value as ThemeMode);
   setAutoCheck(settingsField("autoUpdateCheck").checked);
+  setNotificationsEnabled(settingsField("desktopNotifications").checked);
   try {
     await invoke("save_settings", { settings: next, secret });
     settings = next;
@@ -1343,6 +1381,7 @@ async function boot() {
     shuttingDown = true;
   });
   await listen("sessions-changed", () => refreshSessions());
+  await listen<ClaudeEvent>("claude-event", (e) => onClaudeEvent(e.payload));
   window.addEventListener("focus", () => refreshSessions());
   setInterval(refreshSessions, 20000);
   setInterval(() => renderSessions(), 60000);
