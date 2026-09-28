@@ -49,7 +49,8 @@ export function fillSyncForm(form: HTMLFormElement, target: SyncTarget) {
     field(form, name).value = "";
   }
   field(form, "sftpAuth").value = "password";
-  field(form, "ftpSecure").checked = false;
+  // FTPS unless an existing target says otherwise.
+  field(form, "ftpSecure").checked = true;
   switch (target.kind) {
     case "folder":
       field(form, "folderPath").value = target.path;
@@ -113,13 +114,24 @@ export function readSyncForm(form: HTMLFormElement, fingerprint: string | null):
   }
 }
 
+/** Warning for targets whose password and conversations travel unencrypted. */
+export function transportWarning(target: SyncTarget): string | null {
+  if (target.kind === "ftp" && !target.secure) {
+    return "Sans FTPS, le mot de passe et les conversations circulent en clair sur le réseau.";
+  }
+  if (target.kind === "webdav" && /^http:\/\//i.test(target.url)) {
+    return "Adresse en http:// : le mot de passe et les conversations circulent en clair. À réserver à un réseau local de confiance.";
+  }
+  return null;
+}
+
 /** Human readable reason why the target can't be used yet, if any. */
 export function missingSyncField(target: SyncTarget): string | null {
   switch (target.kind) {
     case "folder":
       return target.path ? null : "Choisis le dossier synchronisé.";
     case "webdav":
-      if (!/^https?:\/\//.test(target.url)) return "L'adresse WebDAV doit commencer par https://";
+      if (!/^https?:\/\//.test(target.url)) return "L'adresse WebDAV doit commencer par https:// (ou http://).";
       return target.user ? null : "Indique l'utilisateur.";
     case "sftp":
     case "ftp":
