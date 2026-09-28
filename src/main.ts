@@ -148,6 +148,11 @@ let shuttingDown = false;
 /** SFTP host key approved in the settings dialog, see readSyncForm. */
 let approvedFingerprint: string | null = null;
 
+interface EncryptionStatus {
+  enabled: boolean;
+  unlocked: boolean;
+}
+
 interface TestOutcome {
   ok: boolean;
   message: string;
@@ -1168,6 +1173,93 @@ function renderFingerprint() {
   $("#transport-warning").textContent = transportWarning(target) ?? "";
 }
 
+// ---------- encryption ----------
+
+/** Encryption of the saved target, as last read; drives the buttons. */
+let encryption: EncryptionStatus | null = null;
+
+async function renderEncryption() {
+  const status = $("#encryption-status");
+  const on = $<HTMLButtonElement>("#encryption-on");
+  const off = $<HTMLButtonElement>("#encryption-off");
+  const target = readSyncForm($<HTMLFormElement>("#settings-form"), approvedFingerprint);
+  encryption = null;
+  on.disabled = off.disabled = true;
+  if (target.kind === "none") return;
+  if (JSON.stringify(target) !== JSON.stringify(settings.sync)) {
+    status.textContent = "Enregistre d'abord cette cible pour gérer son chiffrement.";
+    return;
+  }
+  status.textContent = "Vérification…";
+  try {
+    encryption = await invoke<EncryptionStatus | null>("encryption_status");
+  } catch (e) {
+    status.textContent = `État du chiffrement inconnu : ${e}`;
+    return;
+  }
+  if (!encryption) return;
+  const locked = encryption.enabled && !encryption.unlocked;
+  status.textContent = !encryption.enabled
+    ? "Non chiffrée : la cible peut lire les conversations."
+    : locked
+      ? "Chiffrée, mais ce PC n'a pas la phrase de passe : saisis celle utilisée sur tes autres PC."
+      : "Chiffrée ✓ — ce PC a la phrase de passe.";
+  $("#encryption-pass-label").hidden = encryption.enabled && !locked;
+  on.hidden = encryption.enabled && !locked;
+  on.textContent = locked ? "Déverrouiller" : "Activer";
+  off.hidden = !encryption.enabled || locked;
+  on.disabled = off.disabled = false;
+}
+
+async function changeEncryption(enable: boolean) {
+  const passField = settingsField("encryptionPassphrase");
+  const passphrase = passField.value;
+  const unlocking = enable && !!encryption?.enabled;
+  if (enable && !passphrase) return showEncryptionMessage("Saisis la phrase de passe.");
+  if (enable && !unlocking) {
+    const choice = await ask(
+      "Activer le chiffrement de bout en bout ?\n\n" +
+        "• Tous tes PC doivent d'abord avoir cette version de Claude Legend.\n" +
+        "• Saisis ensuite la même phrase de passe sur chacun d'eux.\n" +
+        "• Sans la phrase de passe, les conversations de la cible sont irrécupérables.\n" +
+        "• Les noms des projets et des fichiers restent visibles sur la cible.",
+      [
+        { label: "Annuler", value: "cancel" },
+        { label: "Chiffrer", value: "ok", primary: true },
+      ],
+    );
+    if (choice !== "ok") return;
+  }
+  if (!enable) {
+    const choice = await ask("Désactiver le chiffrement ? Les conversations seront de nouveau lisibles par la cible.", [
+      { label: "Annuler", value: "cancel" },
+      { label: "Désactiver", value: "ok", primary: true },
+    ]);
+    if (choice !== "ok") return;
+  }
+  $<HTMLButtonElement>("#encryption-on").disabled = $<HTMLButtonElement>("#encryption-off").disabled = true;
+  showEncryptionMessage(enable ? "Chiffrement des fichiers de la cible…" : "Déchiffrement des fichiers de la cible…");
+  try {
+    const count = await invoke<number>("set_encryption", { enable, passphrase: passphrase || null });
+    passField.value = "";
+    await renderEncryption();
+    toast(
+      unlocking
+        ? "Phrase de passe enregistrée : ce PC synchronise de nouveau."
+        : enable
+          ? `Chiffrement activé : ${count} fichier(s) chiffré(s).`
+          : `Chiffrement désactivé : ${count} fichier(s) déchiffré(s).`,
+    );
+  } catch (e) {
+    await renderEncryption();
+    showEncryptionMessage(`${e}`);
+  }
+}
+
+function showEncryptionMessage(text: string) {
+  $("#encryption-status").textContent = text;
+}
+
 function showTestResult(text: string, kind: "ok" | "fail" | "" = "") {
   const result = $("#test-result");
   result.textContent = text;
@@ -1195,6 +1287,8 @@ async function openSettings() {
   $("#claude-detected").textContent = info.claudePath ? `Détecté : ${info.claudePath}` : info.claudeError ?? "";
   const hasSecret = settings.sync.kind !== "none" && (await invoke<boolean>("has_sync_secret", { target: settings.sync }).catch(() => false));
   settingsField("secret").placeholder = hasSecret ? "enregistré — laisser vide pour le conserver" : "";
+  settingsField("encryptionPassphrase").value = "";
+  renderEncryption();
   const dialog = $<HTMLDialogElement>("#settings-dialog");
   dialog.returnValue = "";
   dialog.showModal();
@@ -1320,6 +1414,8 @@ async function boot() {
     if (typeof key === "string") settingsField("keyPath").value = key;
   };
   $("#test-sync").onclick = () => runSyncTest();
+  $("#encryption-on").onclick = () => changeEncryption(true);
+  $("#encryption-off").onclick = () => changeEncryption(false);
   $<HTMLDialogElement>("#rules-dialog").addEventListener("close", (e) => {
     if ((e.target as HTMLDialogElement).returnValue === "save") saveRules();
   });
@@ -1330,6 +1426,7 @@ async function boot() {
   settingsForm.addEventListener("change", (e) => {
     const name = (e.target as HTMLInputElement).name;
     if (name === "syncKind" || name === "sftpAuth") updateSyncVisibility(settingsForm);
+    if (name !== "encryptionPassphrase") renderEncryption();
     renderFingerprint();
     showTestResult("");
   });
