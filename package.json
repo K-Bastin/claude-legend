@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "version:set": "node scripts/set-version.mjs",
-    "dev:no-watch": "tauri dev --no-watch"
+    "dev:no-watch": "tauri dev --no-watch",
+    "screenshot": "node scripts/screenshot.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
