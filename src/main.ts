@@ -95,6 +95,13 @@ const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as
 let settings: Settings;
 let info: AppInfo;
 let sessions: SessionEntry[] = [];
+/** Plan usage last reported by Claude Code, see refreshQuota. */
+interface RateLimit {
+  used_percentage: number;
+  /** Unix time in seconds. */
+  resets_at?: number;
+}
+let quota: { rateLimits: { five_hour?: RateLimit; seven_day?: RateLimit }; updatedAt: number } | null = null;
 /** Projects that have rules, see openRules. */
 let rulesKeys = new Set<string>();
 let lastReport: SyncReport | null = null;
@@ -316,8 +323,58 @@ function renderStatus() {
       lines.push(errs);
     }
   }
+  lines.push(...quotaRows());
   lines.push(el("div", { textContent: info.syncEnabled ? `${settings.machineName} · ${info.syncLabel}` : settings.machineName }));
   status.replaceChildren(...lines);
+}
+
+// ---------- quota ----------
+
+async function refreshQuota() {
+  quota = await invoke<typeof quota>("get_quota").catch(() => null);
+  renderStatus();
+}
+
+function formatReset(seconds: number): string {
+  const date = new Date(seconds * 1000);
+  const time = date.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+  if (date.toDateString() === new Date().toDateString()) return time;
+  if (seconds * 1000 - Date.now() < 6 * 86_400_000) return `${date.toLocaleDateString("fr-FR", { weekday: "short" })} ${time}`;
+  return date.toLocaleDateString("fr-FR", { day: "numeric", month: "short" });
+}
+
+function quotaRow(label: string, limit: RateLimit): HTMLElement {
+  const reset = limit.resets_at;
+  // Past its reset time, the window has started over.
+  const expired = reset !== undefined && reset * 1000 <= Date.now();
+  const used = expired ? 0 : Math.max(0, Math.min(100, Math.round(limit.used_percentage)));
+  const level = used >= 90 ? "danger" : used >= 70 ? "warn" : "ok";
+  const fill = el("span", { className: `quota-fill ${level}` });
+  fill.style.width = `${used}%`;
+  const resetText = expired ? "réinitialisé" : reset ? `↻ ${formatReset(reset)}` : "";
+  const updated = quota ? relativeTime(quota.updatedAt) : "";
+  return el(
+    "div",
+    {
+      className: "quota-row",
+      title: `${label} : ${used} % utilisé${reset && !expired ? `, réinitialisation ${new Date(reset * 1000).toLocaleString("fr-FR")}` : ""}\nDernière mesure ${updated}, à la dernière réponse de Claude.`,
+    },
+    el("span", { className: "quota-label", textContent: label }),
+    el("span", { className: "quota-bar" }, fill),
+    el("span", { className: "quota-pct", textContent: `${used} %` }),
+    el("span", { className: "quota-reset", textContent: resetText }),
+  );
+}
+
+function quotaRows(): HTMLElement[] {
+  const limits = quota?.rateLimits;
+  if (!limits || (!limits.five_hour && !limits.seven_day)) {
+    return [el("div", { className: "quota-empty", textContent: "Quota : affiché après une réponse de Claude" })];
+  }
+  const rows: HTMLElement[] = [];
+  if (limits.five_hour) rows.push(quotaRow("Session 5 h", limits.five_hour));
+  if (limits.seven_day) rows.push(quotaRow("Semaine", limits.seven_day));
+  return [el("div", { className: "quota" }, ...rows)];
 }
 
 // ---------- sync ----------
@@ -1132,6 +1189,8 @@ async function boot() {
   renderPanes();
 
   await refreshSessions();
+  await refreshQuota();
+  setInterval(refreshQuota, 15_000);
   await restoreTabs();
   setTimeout(() => checkAtStartup(installHooks), 3000);
   if (!info.syncEnabled) {

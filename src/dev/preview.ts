@@ -154,6 +154,14 @@ export function installPreview() {
           pty?.channel.onmessage({ kind: "exit", code: 0 });
           return null;
         }
+        case "get_quota":
+          return {
+            rateLimits: {
+              five_hour: { used_percentage: 66, resets_at: Math.round(Date.now() / 1000) + 2 * 3600 },
+              seven_day: { used_percentage: 9, resets_at: Math.round(Date.now() / 1000) + 4 * 86400 },
+            },
+            updatedAt: Date.now() - 5 * 60_000,
+          };
         case "rules_keys":
           return Object.keys(rules).filter((k) => rules[k].trim());
         case "get_project_rules":

@@ -57,6 +57,14 @@ Claude pour toutes les conversations du projet (`claude --append-system-prompt-f
 synchronisation avec tes autres PC — et ton équipe si elle utilise la même destination — et
 prises en compte au prochain lancement ou à la prochaine reprise d'une conversation.
 
+### Quota
+
+En bas à gauche, deux barres montrent l'utilisation de ton forfait Claude : la fenêtre de 5 heures
+et la semaine, avec l'heure de réinitialisation. Les valeurs viennent de Claude Code lui-même
+(données de sa barre d'état), mises à jour à chaque réponse de Claude dans l'application. Pour cela
+l'application se place comme barre d'état des sessions qu'elle lance (`--settings`, sans modifier
+tes fichiers de réglages) et relaie ta propre barre d'état si tu en as une.
+
 ### Mises à jour
 
 Au lancement, l'application vérifie la dernière release publiée sur GitHub et propose de l'installer
