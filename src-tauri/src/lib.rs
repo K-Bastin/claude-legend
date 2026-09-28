@@ -442,7 +442,7 @@ fn open_session_blocking(
         }
         Err(e) => warnings.push(format!("Suivi du quota indisponible : {e:#}")),
     }
-    args.extend(settings.extra_args.split_whitespace().map(str::to_string));
+    args.extend(config::split_args(&settings.extra_args));
 
     if let Some(Err(e)) = state.with_syncer(|s| s.acquire_lock(&session_id)) {
         warnings.push(format!("Verrou de session non posé : {e:#}"));
