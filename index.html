@@ -16,6 +16,7 @@
           <span class="spacer"></span>
           <button id="btn-new" class="icon" title="Nouvelle session (Ctrl+Shift+T)">＋</button>
           <button id="btn-sync" class="icon" title="Synchroniser maintenant">⟳</button>
+          <button id="btn-theme" class="icon" title="Basculer clair / sombre">☾</button>
           <button id="btn-settings" class="icon" title="Réglages">⚙</button>
         </header>
         <input id="search" type="search" placeholder="Rechercher une conversation…" autocomplete="off" />
@@ -98,6 +99,13 @@
             <span id="test-result"></span>
           </div>
         </fieldset>
+        <label>Thème
+          <select name="theme">
+            <option value="system">Comme le système</option>
+            <option value="light">Clair</option>
+            <option value="dark">Sombre</option>
+          </select>
+        </label>
         <label>Nom de ce PC
           <input name="machineName" required />
         </label>

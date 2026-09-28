@@ -8,11 +8,35 @@
   --muted: #9a938a;
   --accent: #d97757;
   --accent-soft: #d9775733;
+  --on-accent: #fff;
   --ok: #7fb069;
   --warn: #e0a84f;
+  --warn-soft: #e0a84f26;
   --danger: #e06c5f;
+  --shadow: #0008;
+  --backdrop: #0009;
   --mono: "JetBrains Mono", "Cascadia Mono", "Fira Code", "DejaVu Sans Mono", Consolas, monospace;
   color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg: #faf9f5;
+  --bg-side: #f0eee6;
+  --bg-hover: #e7e4d9;
+  --bg-active: #dedacd;
+  --border: #d9d5c8;
+  --text: #1f1e1d;
+  --muted: #6b665c;
+  --accent: #c15f3c;
+  --accent-soft: #c15f3c24;
+  --on-accent: #fff;
+  --ok: #3f7d20;
+  --warn: #9a6200;
+  --warn-soft: #9a620020;
+  --danger: #b8322a;
+  --shadow: #1f1e1d33;
+  --backdrop: #1f1e1d55;
+  color-scheme: light;
 }
 
 * {
@@ -44,7 +68,7 @@ button:hover {
 button.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 button.primary:hover {
   filter: brightness(1.08);
@@ -205,7 +229,7 @@ input:focus {
   color: var(--accent);
 }
 .badge.lock {
-  background: #e0a84f26;
+  background: var(--warn-soft);
   color: var(--warn);
 }
 .badge.cloud {
@@ -316,7 +340,7 @@ input:focus {
 }
 .tab.active .pane-badge {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 .tab {
   display: flex;
@@ -431,7 +455,7 @@ input:focus {
 }
 .pane.focused .pane-num {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 .pane-body {
   position: relative;
@@ -475,7 +499,7 @@ input:focus {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  box-shadow: 0 6px 20px #0006;
+  box-shadow: 0 6px 20px var(--shadow);
   pointer-events: none;
 }
 body.dragging,
@@ -533,10 +557,10 @@ dialog {
   border-radius: 10px;
   padding: 20px 22px;
   width: min(520px, 92vw);
-  box-shadow: 0 20px 60px #0008;
+  box-shadow: 0 20px 60px var(--shadow);
 }
 dialog::backdrop {
-  background: #0009;
+  background: var(--backdrop);
 }
 dialog h2 {
   margin: 0 0 14px;
@@ -589,7 +613,7 @@ dialog menu {
   border-left: 3px solid var(--accent);
   border-radius: 6px;
   padding: 9px 12px;
-  box-shadow: 0 6px 20px #0006;
+  box-shadow: 0 6px 20px var(--shadow);
   white-space: pre-line;
 }
 .toast.error {
