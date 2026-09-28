@@ -53,6 +53,15 @@ interface SessionEntry {
   archived: boolean;
 }
 
+interface Conflict {
+  file: string;
+  sessionId: string;
+  title: string;
+  savedAt: number;
+  side: "local" | "distant";
+  promptCount: number;
+}
+
 interface SyncReport {
   at: number;
   pushed: number;
@@ -107,6 +116,8 @@ let quota: { rateLimits: { five_hour?: RateLimit; seven_day?: RateLimit }; updat
 /** Projects that have rules, see openRules. */
 let rulesKeys = new Set<string>();
 let lastReport: SyncReport | null = null;
+/** Versions set aside by sync conflicts, see openConflicts. */
+let conflicts: Conflict[] = [];
 /** The list shows archived conversations instead of the others. */
 let showArchived = false;
 let syncing = false;
@@ -216,10 +227,12 @@ async function refreshSessions() {
   try {
     sessions = await invoke<SessionEntry[]>("list_sessions");
     rulesKeys = new Set(await invoke<string[]>("rules_keys"));
+    conflicts = await invoke<Conflict[]>("list_conflicts");
   } catch (e) {
     toast(`Lecture des sessions impossible : ${e}`, "error");
   }
   renderSessions();
+  renderStatus();
 }
 
 function renderSessions() {
@@ -359,13 +372,85 @@ function renderStatus() {
         className: "err",
         textContent: `${lastReport.errors.length + lastReport.conflicts.length} alerte(s) — détails`,
       });
-      errs.onclick = () => toast([...lastReport!.conflicts, ...lastReport!.errors].join("\n"), "warn", 15000);
+      errs.onclick = openConflicts;
       lines.push(errs);
     }
+  }
+  if (conflicts.length) {
+    const link = el("div", {
+      className: "err",
+      textContent: `${conflicts.length} version(s) mise(s) de côté — voir`,
+      title: "Versions de conversations modifiées sur deux PC à la fois",
+    });
+    link.onclick = openConflicts;
+    lines.push(link);
   }
   lines.push(...quotaRows());
   lines.push(el("div", { textContent: info.syncEnabled ? `${settings.machineName} · ${info.syncLabel}` : settings.machineName }));
   status.replaceChildren(...lines);
+}
+
+// ---------- sync alerts ----------
+
+function openConflicts() {
+  renderConflicts();
+  const dialog = $<HTMLDialogElement>("#conflicts-dialog");
+  if (!dialog.open) dialog.showModal();
+}
+
+function renderConflicts() {
+  const messages = lastReport ? [...lastReport.errors, ...lastReport.conflicts] : [];
+  $("#sync-errors").hidden = !messages.length;
+  $("#sync-error-list").replaceChildren(...messages.map((m) => el("li", { textContent: m })));
+  $("#conflict-section").hidden = !conflicts.length && !!messages.length;
+  $("#conflict-list").replaceChildren(
+    ...(conflicts.length
+      ? conflicts.map((c) => {
+          const restore = el("button", { type: "button", textContent: "Restaurer comme nouvelle conversation" });
+          restore.onclick = () => restoreConflict(c);
+          const remove = el("button", { type: "button", textContent: "Supprimer" });
+          remove.onclick = () => deleteConflict(c);
+          const when = new Date(c.savedAt).toLocaleString("fr-FR", { dateStyle: "medium", timeStyle: "short" });
+          return el(
+            "li",
+            { className: "conflict" },
+            el("div", { className: "conflict-title", textContent: c.title }),
+            el("div", {
+              className: "meta",
+              textContent: `Version ${c.side === "local" ? "de ce PC" : "d'un autre PC"}, mise de côté le ${when} · ${c.promptCount} message(s)`,
+            }),
+            el("div", { className: "row" }, restore, remove),
+          );
+        })
+      : [el("li", { className: "meta", textContent: "Aucune version mise de côté." })]),
+  );
+}
+
+async function restoreConflict(c: Conflict) {
+  try {
+    await invoke<string>("restore_conflict", { file: c.file });
+    toast(`Version de « ${c.title} » restaurée comme nouvelle conversation.`);
+    await refreshSessions();
+    renderConflicts();
+  } catch (e) {
+    toast(`Restauration impossible : ${e}`, "error", 10000);
+  }
+}
+
+async function deleteConflict(c: Conflict) {
+  const choice = await ask(`Supprimer définitivement cette version de « ${c.title} » ?`, [
+    { label: "Annuler", value: "cancel" },
+    { label: "Supprimer", value: "delete", primary: true },
+  ]);
+  if (choice === "delete") {
+    try {
+      await invoke("delete_conflict", { file: c.file });
+      await refreshSessions();
+    } catch (e) {
+      toast(`${e}`, "error");
+    }
+  }
+  openConflicts();
 }
 
 // ---------- quota ----------

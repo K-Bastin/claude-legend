@@ -150,6 +150,27 @@
       </form>
     </dialog>
 
+    <dialog id="conflicts-dialog">
+      <form method="dialog">
+        <h2>Alertes de synchronisation</h2>
+        <section id="sync-errors">
+          <h3>Dernière synchronisation</h3>
+          <ul id="sync-error-list"></ul>
+        </section>
+        <section id="conflict-section">
+          <h3>Versions mises de côté</h3>
+          <p class="dialog-hint">
+            Quand une conversation a changé sur deux PC à la fois, la version la plus récente est gardée et
+            l'autre est mise de côté ici. Restaure-la pour la retrouver comme une conversation à part.
+          </p>
+          <ul id="conflict-list"></ul>
+        </section>
+        <menu>
+          <button value="close" class="primary">Fermer</button>
+        </menu>
+      </form>
+    </dialog>
+
     <dialog id="rules-dialog">
       <form method="dialog" id="rules-form">
         <h2 id="rules-title"></h2>
