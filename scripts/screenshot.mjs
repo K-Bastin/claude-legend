@@ -4,7 +4,8 @@
 //
 // Runs the debug build (`cargo build` in src-tauri) against the Vite dev server,
 // in isolated settings, data and Claude folders filled with fake sessions and
-// quota, with a fake `claude` so no real session is shown, started or modified.
+// quota, with a fake `claude` so no real session is shown, started or modified
+// (it reports a finished answer through the hook relay two seconds in).
 // The virtual screen has the window size of tauri.conf.json (without a window
 // manager, the window cannot be resized). Each --js expression runs in the page,
 // in order, through the WebKit remote inspector, before the capture. Linux only;
@@ -148,7 +149,15 @@ try {
   const fakeClaude = join(home, "fake-claude.sh");
   writeFileSync(
     fakeClaude,
-    `#!/bin/bash\nprintf '\\033[1mFake Claude\\033[0m (capture)\\n'\nwhile true; do read -r -t 1 _; done\n`,
+    [
+      "#!/bin/bash",
+      "printf '\\033[1mFake Claude\\033[0m (capture)\\n'",
+      // Like Claude Code finishing an answer: the Stop hook, through the app's relay.
+      'id=; prev=; for a in "$@"; do case "$prev" in --resume|--session-id) id="$a";; esac; prev="$a"; done',
+      `(sleep 2; printf '{"session_id":"%s","hook_event_name":"Stop"}' "$id" | "${APP}" --hook-relay) &`,
+      "while true; do read -r -t 1 _; done",
+      "",
+    ].join("\n"),
   );
   chmodSync(fakeClaude, 0o755);
   writeFileSync(

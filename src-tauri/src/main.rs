@@ -6,5 +6,9 @@ fn main() {
     if std::env::args().nth(1).as_deref() == Some(claude_legend_lib::STATUSLINE_RELAY_ARG) {
         return claude_legend_lib::statusline_relay();
     }
+    // Claude Code runs it as a hook to report what sessions are waiting for.
+    if std::env::args().nth(1).as_deref() == Some(claude_legend_lib::HOOK_RELAY_ARG) {
+        return claude_legend_lib::hook_relay();
+    }
     claude_legend_lib::run()
 }

@@ -1,6 +1,7 @@
 mod archive;
 mod config;
 mod conflicts;
+mod events;
 mod paths;
 mod pty;
 mod quota;
@@ -14,6 +15,7 @@ use config::{Machine, Settings, SyncTarget};
 use portable_pty::PtySize;
 use pty::{Launch, PtyEvent, PtyManager};
 
+pub use events::{relay as hook_relay, RELAY_ARG as HOOK_RELAY_ARG};
 pub use quota::{relay as statusline_relay, RELAY_ARG as STATUSLINE_RELAY_ARG};
 use serde::{Deserialize, Serialize};
 use sessions::SessionIndex;
@@ -453,7 +455,9 @@ fn open_session_blocking(
             args.extend(options.args);
             env = options.env;
         }
-        Err(e) => warnings.push(format!("Suivi du quota indisponible : {e:#}")),
+        Err(e) => warnings.push(format!(
+            "Suivi du quota et notifications indisponibles : {e:#}"
+        )),
     }
     args.extend(config::split_args(&settings.extra_args));
 
@@ -613,6 +617,16 @@ async fn map_project(app: AppHandle, project_key: String, path: String) -> CmdRe
     .map_err(err)?
 }
 
+/// Forwards the events left by the hook relay to the page.
+fn events_loop(app: AppHandle, dir: PathBuf) {
+    loop {
+        std::thread::sleep(Duration::from_millis(700));
+        for event in events::drain(&dir) {
+            let _ = app.emit("claude-event", &event);
+        }
+    }
+}
+
 fn background_loop(app: AppHandle) {
     let mut last_sync: Option<Instant> = None;
     let mut last_heartbeat = Instant::now();
@@ -643,6 +657,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let config_dir = app.path().app_config_dir()?;
             let data_dir = app.path().app_data_dir()?;
@@ -663,6 +678,11 @@ pub fn run() {
             });
             let handle = app.handle().clone();
             std::thread::spawn(move || background_loop(handle));
+            let handle = app.handle().clone();
+            let events_dir = events::dir(&app.state::<AppState>().data_dir);
+            // Events of a previous run are stale.
+            events::drain(&events_dir);
+            std::thread::spawn(move || events_loop(handle, events_dir));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
