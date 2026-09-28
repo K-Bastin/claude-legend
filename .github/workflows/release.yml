@@ -72,4 +72,4 @@ jobs:
           releaseDraft: true
           generateReleaseNotes: true
           # latest.json, read by the in-app updater once the release is published.
-          includeUpdaterJson: true
+          uploadUpdaterJson: true
