@@ -57,19 +57,26 @@ function evaluate(expression) {
   });
 }
 
-/** Fake Claude Code history: a few sessions, and plan usage as the status line relay records it. */
-function seedFakeData(claudeHome, dataDir) {
+/**
+ * Fake Claude Code history: a few sessions whose project folders exist under
+ * `home`, so they can be resumed, and plan usage as the status line relay
+ * records it.
+ */
+function seedFakeData(home, claudeHome, dataDir) {
   const HOUR = 3_600_000;
   const now = Date.now();
   const sessions = [
-    ["Refonte de la synchronisation", "/home/preview/dev/claude-legend", "develop", 0.1],
-    ["Écran partagé en 4 panneaux", "/home/preview/dev/claude-legend", "feature/split", 3],
-    ["Corriger le calcul des adresses", "/home/preview/dev/cohabsys", "main", 26],
-    ["Migration de la base de données", "/home/preview/dev/cohabsys", "main", 50],
-    ["Tableau de bord des ventes", "/home/preview/dev/tric-house", "develop", 80],
+    ["Refonte de la synchronisation", "claude-legend", "develop", 0.1],
+    ["Écran partagé en 4 panneaux", "claude-legend", "feature/split", 3],
+    ["Corriger le calcul des adresses", "cohabsys", "main", 26],
+    ["Migration de la base de données", "cohabsys", "main", 50],
+    ["Tableau de bord des ventes", "tric-house", "develop", 80],
   ];
-  sessions.forEach(([title, cwd, gitBranch, hoursAgo], i) => {
-    const dir = join(claudeHome, "projects", cwd.replaceAll("/", "-"));
+  sessions.forEach(([title, project, gitBranch, hoursAgo], i) => {
+    const cwd = join(home, "dev", project);
+    mkdirSync(cwd, { recursive: true });
+    // Claude Code's folder name for a project: every non-alphanumeric character becomes "-".
+    const dir = join(claudeHome, "projects", cwd.replace(/[^A-Za-z0-9]/g, "-"));
     mkdirSync(dir, { recursive: true });
     const file = join(dir, `00000000-0000-4000-8000-00000000000${i}.jsonl`);
     const lines = [
@@ -121,7 +128,7 @@ try {
   const config = join(home, "config", tauriConf.identifier);
   mkdirSync(config, { recursive: true });
   const claudeHome = join(home, "claude");
-  seedFakeData(claudeHome, join(home, "data", tauriConf.identifier));
+  seedFakeData(home, claudeHome, join(home, "data", tauriConf.identifier));
   const syncDir = join(home, "sync");
   mkdirSync(syncDir);
   const fakeClaude = join(home, "fake-claude.sh");
