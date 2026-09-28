@@ -413,6 +413,9 @@ input:focus {
   gap: 1px;
   background: var(--border);
 }
+#terminals[hidden] {
+  display: none;
+}
 #terminals.layout-1 {
   grid-template: 1fr / 1fr;
 }
