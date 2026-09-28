@@ -118,6 +118,9 @@ let rulesKeys = new Set<string>();
 let lastReport: SyncReport | null = null;
 /** Versions set aside by sync conflicts, see openConflicts. */
 let conflicts: Conflict[] = [];
+/** Conversations whose messages match the search, with an excerpt, see searchContent. */
+let contentHits = new Map<string, string>();
+let searchTimer: ReturnType<typeof setTimeout> | undefined;
 /** The list shows archived conversations instead of the others. */
 let showArchived = false;
 let syncing = false;
@@ -243,7 +246,9 @@ function renderSessions() {
   const visible = sessions.filter(
     (s) =>
       s.archived === showArchived &&
-      (!query || `${s.title} ${s.firstPrompt} ${s.projectName} ${s.gitBranch ?? ""}`.toLowerCase().includes(query)),
+      (!query ||
+        `${s.title} ${s.firstPrompt} ${s.projectName} ${s.gitBranch ?? ""}`.toLowerCase().includes(query) ||
+        contentHits.has(s.id)),
   );
   const toggle = archivedCount
     ? el("button", {
@@ -326,6 +331,7 @@ function renderSessions() {
         },
         el("div", { className: "title" }, el("span", { className: "t", textContent: s.title }), ...badges, archiveBtn),
         el("div", { className: "meta", textContent: meta }),
+        query && contentHits.has(s.id) ? el("div", { className: "snippet", textContent: contentHits.get(s.id)! }) : null,
       );
       item.onclick = () => resumeSession(s);
       makeDraggable(item, () => s.title, (pane) => {
@@ -340,6 +346,31 @@ function renderSessions() {
   }
   if (toggle) nodes.push(toggle);
   list.replaceChildren(...nodes);
+}
+
+/** Filters titles right away, then searches the messages once typing pauses. */
+function onSearchInput() {
+  const query = $<HTMLInputElement>("#search").value.trim();
+  clearTimeout(searchTimer);
+  if (query.length < 3) {
+    contentHits = new Map();
+    renderSessions();
+    return;
+  }
+  renderSessions();
+  searchTimer = setTimeout(() => searchContent(query), 250);
+}
+
+async function searchContent(query: string) {
+  try {
+    const hits = await invoke<{ id: string; snippet: string }[]>("search_sessions", { query });
+    // Typing went on while searching.
+    if ($<HTMLInputElement>("#search").value.trim() !== query) return;
+    contentHits = new Map(hits.map((h) => [h.id, h.snippet]));
+    renderSessions();
+  } catch (e) {
+    toast(`Recherche impossible : ${e}`, "error");
+  }
 }
 
 async function setArchived(s: SessionEntry, archived: boolean) {
@@ -1240,7 +1271,7 @@ async function boot() {
   $("#btn-theme").onclick = () => setThemeMode(theme === "dark" ? "light" : "dark");
   onSystemThemeChange(() => themeMode === "system" && refreshTheme());
   refreshTheme();
-  $("#search").oninput = renderSessions;
+  $("#search").oninput = onSearchInput;
   const settingsForm = $<HTMLFormElement>("#settings-form");
   $("#pick-sync-dir").onclick = async () => {
     const dir = await pickFolder("Dossier synchronisé entre tes PC");

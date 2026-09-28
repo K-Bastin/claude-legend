@@ -66,13 +66,13 @@ function seedFakeData(home, claudeHome, dataDir) {
   const HOUR = 3_600_000;
   const now = Date.now();
   const sessions = [
-    ["Refonte de la synchronisation", "claude-legend", "develop", 0.1],
-    ["Écran partagé en 4 panneaux", "claude-legend", "feature/split", 3],
-    ["Corriger le calcul des adresses", "cohabsys", "main", 26],
-    ["Migration de la base de données", "cohabsys", "main", 50],
-    ["Tableau de bord des ventes", "tric-house", "develop", 80],
+    ["Refonte de la synchronisation", "claude-legend", "develop", 0.1, "J'ai remplacé le polling par un index distant mis en cache."],
+    ["Écran partagé en 4 panneaux", "claude-legend", "feature/split", 3, "La grille accepte maintenant jusqu'à quatre terminaux."],
+    ["Corriger le calcul des adresses", "cohabsys", "main", 26, "Le code postal était lu avant la commune : c'est corrigé."],
+    ["Migration de la base de données", "cohabsys", "main", 50, "La migration ajoute un index sur la table des logements."],
+    ["Tableau de bord des ventes", "tric-house", "develop", 80, "Les ventes sont regroupées par semaine et par magasin."],
   ];
-  sessions.forEach(([title, project, gitBranch, hoursAgo], i) => {
+  sessions.forEach(([title, project, gitBranch, hoursAgo, answer], i) => {
     const cwd = join(home, "dev", project);
     mkdirSync(cwd, { recursive: true });
     // Claude Code's folder name for a project: every non-alphanumeric character becomes "-".
@@ -81,6 +81,7 @@ function seedFakeData(home, claudeHome, dataDir) {
     const file = join(dir, `00000000-0000-4000-8000-00000000000${i}.jsonl`);
     const lines = [
       { type: "user", cwd, gitBranch, message: { role: "user", content: title } },
+      { type: "assistant", cwd, message: { role: "assistant", content: [{ type: "text", text: answer }] } },
       { type: "ai-title", aiTitle: title },
     ];
     writeFileSync(file, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
