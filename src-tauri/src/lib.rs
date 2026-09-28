@@ -84,7 +84,8 @@ impl AppState {
         let mut guard = self.remote.lock().unwrap();
         if guard.as_ref().is_none_or(|r| r.target() != &settings.sync) {
             let secret = store::secret::load(&settings.sync);
-            *guard = Some(Remote::new(settings.sync.clone(), secret));
+            let passphrase = store::secret::load_encryption(&settings.sync);
+            *guard = Some(Remote::new(settings.sync.clone(), secret, passphrase));
         }
         let remote = guard.as_mut().unwrap();
         remote.begin();
@@ -507,6 +508,73 @@ fn open_session_blocking(
     })
 }
 
+/// Encryption of the configured sync target, `None` without one.
+#[tauri::command]
+async fn encryption_status(app: AppHandle) -> CmdResult<Option<store::EncryptionStatus>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let target = state.settings.lock().unwrap().sync.clone();
+        if !target.is_enabled() {
+            return Ok(None);
+        }
+        let mut remote = Remote::new(
+            target.clone(),
+            store::secret::load(&target),
+            store::secret::load_encryption(&target),
+        );
+        remote
+            .encryption_status()
+            .map(Some)
+            .map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Turns end-to-end encryption of the sync target on or off, rewriting its
+/// files. `passphrase` (kept in the keyring once it works) is needed to turn
+/// it on, or to unlock a target encrypted from another machine. Returns the
+/// number of files rewritten.
+#[tauri::command]
+async fn set_encryption(
+    app: AppHandle,
+    enable: bool,
+    passphrase: Option<String>,
+) -> CmdResult<u32> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let target = state.settings.lock().unwrap().sync.clone();
+        if !target.is_enabled() {
+            return Err("Synchronisation non configurée".to_string());
+        }
+        let passphrase = passphrase
+            .filter(|p| !p.is_empty())
+            .or_else(|| store::secret::load_encryption(&target));
+        // Holding the connection lock keeps syncs out while files are rewritten.
+        let mut guard = state.remote.lock().unwrap();
+        let mut remote = Remote::new(
+            target.clone(),
+            store::secret::load(&target),
+            passphrase.clone(),
+        );
+        let rewritten = remote
+            .set_encryption(enable)
+            .map_err(|e| format!("{e:#}"))?;
+        store::secret::save_encryption(&target, passphrase.as_deref().filter(|_| enable))
+            .map_err(err)?;
+        *guard = None;
+        drop(guard);
+        std::thread::spawn(move || {
+            let state = app.state::<AppState>();
+            state.run_full_sync(&app);
+            let _ = app.emit("sessions-changed", ());
+        });
+        Ok(rewritten)
+    })
+    .await
+    .map_err(err)?
+}
+
 /// Conversations of this machine whose messages contain `query`.
 #[tauri::command]
 async fn search_sessions(app: AppHandle, query: String) -> CmdResult<Vec<search::Hit>> {
@@ -706,6 +774,8 @@ pub fn run() {
             save_project_rules,
             set_archived,
             search_sessions,
+            encryption_status,
+            set_encryption,
             list_conflicts,
             restore_conflict,
             delete_conflict,

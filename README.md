@@ -27,12 +27,36 @@ Le code des projets n'est pas synchronisé : utilise git pour ça.
 | --- | --- | --- |
 | Dossier synchronisé | `~/Sync` | Synchronisé par un autre outil (Syncthing, client Nextcloud, OneDrive…). Les données sont dans `<dossier>/claude-legend/`. |
 | SFTP | `nas.local:22`, dossier `claude-legend` | Mot de passe, clé privée ou agent SSH. L'empreinte du serveur est affichée à la première connexion et vérifiée ensuite. |
-| FTP / FTPS | `ftp.exemple.fr:21` | Cocher « FTPS » pour chiffrer (AUTH TLS, certificats du système). |
+| FTP / FTPS | `ftp.exemple.fr:21` | FTPS (AUTH TLS, certificats du système) coché par défaut ; sans lui, mot de passe et conversations circulent en clair. |
 | WebDAV | `https://cloud.exemple.fr/remote.php/dav/files/moi/claude-legend` | Nextcloud, ownCloud, NAS Synology/QNAP… Utilise un mot de passe d'application si le compte a la double authentification. |
 
 Les mots de passe sont conservés dans le trousseau du système (Secret Service sous Linux,
 Gestionnaire d'identifiants sous Windows), jamais dans les fichiers de réglages.
 « Tester la connexion » vérifie l'accès en lecture et en écriture.
+
+### Chiffrement de bout en bout
+
+Dans ⚙ → Synchronisation, « Chiffrement de bout en bout » chiffre les conversations sur ton PC
+avant l'envoi (XChaCha20-Poly1305, clé dérivée de ta phrase de passe par Argon2id) : la
+destination ne peut plus les lire. Avant de l'activer, mets tous tes PC à jour ; saisis ensuite la
+même phrase de passe sur chacun (« Déverrouiller »). Un PC sans la phrase de passe arrête de
+synchroniser plutôt que d'envoyer quoi que ce soit en clair. La phrase de passe est gardée dans le
+trousseau de chaque PC et n'est récupérable nulle part : sans elle, les données chiffrées sont
+perdues. Les noms des fichiers et des dossiers (clés de projet, identifiants de sessions) restent
+visibles.
+
+### Archives, conflits, recherche, notifications
+
+- **Archiver** une conversation (icône au survol) la masque sur tous les PC sans rien supprimer ;
+  « Archives » en bas de la liste permet de la restaurer.
+- Quand une conversation a changé sur deux PC à la fois, la version écartée est listée dans
+  « version(s) mise(s) de côté » en bas à gauche et peut être restaurée comme conversation à part.
+- La recherche porte aussi sur le contenu des conversations de ce PC (à partir de 3 caractères,
+  sans tenir compte des accents), avec un extrait.
+- Une notification de bureau prévient quand Claude attend ta réponse ou a terminé dans une
+  conversation que tu ne regardes pas, et quand le quota dépasse 90 % (désactivable dans ⚙). Elle
+  passe par des hooks `Notification` et `Stop` ajoutés aux sessions lancées par l'application ;
+  tes propres hooks continuent de s'exécuter.
 
 ## Raccourcis
 
