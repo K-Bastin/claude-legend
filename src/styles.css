@@ -519,6 +519,12 @@ body.dragging * {
   height: 100%;
   padding: 8px 4px 4px 10px;
 }
+/* xterm.css paints its viewport #000, and the viewport also covers the
+   padding above: match the terminal background (same as --bg in both themes)
+   so the padding doesn't show as a black frame. */
+.term .xterm .xterm-viewport {
+  background-color: var(--bg);
+}
 
 #welcome {
   position: absolute;
