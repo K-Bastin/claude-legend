@@ -224,12 +224,18 @@ pub fn slug(s: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
+/// Last folder of the path; a filesystem root (`/`, `C:\\`) is named after itself.
 fn folder_name(path: &str) -> String {
-    path.trim_end_matches(['/', '\\'])
+    let name = path
+        .trim_end_matches(['/', '\\'])
         .rsplit(['/', '\\'])
         .next()
-        .unwrap_or(path)
-        .to_string()
+        .unwrap_or("");
+    if name.is_empty() || name.ends_with(':') {
+        path.to_string()
+    } else {
+        name.to_string()
+    }
 }
 
 fn compute_identity(cwd: &str) -> ProjectIdentity {
@@ -254,7 +260,12 @@ fn compute_identity(cwd: &str) -> ProjectIdentity {
         };
     }
     ProjectIdentity {
-        key: format!("local-{}", slug(&name)),
+        key: format!(
+            "local-{}",
+            Some(slug(&name))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "root".into())
+        ),
         name,
         git_remote: None,
     }
@@ -270,5 +281,14 @@ mod tests {
         let b = slug(&normalize_remote("https://github.com/kb/cohabsys"));
         assert_eq!(a, b);
         assert_eq!(a, "github-com-kb-cohabsys");
+    }
+
+    #[test]
+    fn root_folders_get_a_name() {
+        assert_eq!(folder_name("/home/kb/app/"), "app");
+        assert_eq!(folder_name(r"C:\Users\kb\app"), "app");
+        assert_eq!(folder_name("/"), "/");
+        assert_eq!(folder_name(r"C:\"), r"C:\");
+        assert_eq!(compute_identity("/").key, "local-root");
     }
 }
