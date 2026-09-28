@@ -32,7 +32,10 @@ docs: document release procedure
 - **Changement incompatible** : `feat(sync)!: …` et/ou un pied de page `BREAKING CHANGE: …`.
 
 Un hook git (husky + commitlint) vérifie chaque message localement, et la CI vérifie les commits et le titre de chaque PR.
-Les PR sont fusionnées en *squash* : le titre de la PR devient le message du commit sur `develop`.
+Les PR de travail (`feature/*`, `fix/*`…) sont fusionnées en *squash* : le titre de la PR devient
+le message du commit sur `develop`. Seules exceptions, fusionnées en *merge commit* : les releases
+vers `main` et les reports de `main` vers `develop`, pour que `main` reste un ancêtre de `develop`
+(sinon `develop` apparaît « en retard » sur `main` à chaque release).
 
 ## Développement
 
@@ -88,6 +91,7 @@ Avant d'ouvrir une PR, vérifie aussi `cargo clippy --all-targets -- -D warnings
 5. Le workflow `release` vérifie que le tag est sur `main` et correspond à la version du projet,
    compile Linux et Windows, puis crée un brouillon de release avec les notes générées.
    Relis-le et publie-le depuis GitHub.
-6. Reporte `main` dans `develop` : PR `main` → `develop`, ou `git switch develop && git merge main`.
+6. Reporte `main` dans `develop` : PR `main` → `develop`, fusionnée en **merge commit** (jamais en
+   squash, qui recréerait les changements au lieu de rejoindre les historiques).
 
 Un **hotfix** suit le même chemin depuis `main` : `hotfix/<sujet>`, version patch, PR vers `main`, tag, puis report dans `develop`.
