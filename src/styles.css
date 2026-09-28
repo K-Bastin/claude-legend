@@ -244,6 +244,41 @@ input:focus {
   color: var(--muted);
   font-style: italic;
 }
+.session-action {
+  display: none;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin: -2px -4px -2px 0;
+  border-radius: 4px;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+.session-action .ico {
+  width: 14px;
+  height: 14px;
+}
+.session:hover .session-action {
+  display: inline-flex;
+}
+.session-action:hover {
+  background: var(--bg-active);
+  color: var(--text);
+}
+.archive-toggle {
+  display: block;
+  margin: 14px auto 4px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 11px;
+}
+.archive-toggle:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
 .badge {
   font-size: 10px;
   border-radius: 4px;

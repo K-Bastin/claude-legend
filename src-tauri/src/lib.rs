@@ -1,3 +1,4 @@
+mod archive;
 mod config;
 mod paths;
 mod pty;
@@ -89,6 +90,7 @@ impl AppState {
             state_path: self.state_path(),
             conflicts_dir: self.data_dir.join("conflicts"),
             rules_dir: rules::dir(&self.data_dir),
+            archive_dir: archive::dir(&self.data_dir),
             index: &self.index,
             open_sessions,
             fresh_index: RefCell::new(None),
@@ -126,6 +128,7 @@ struct SessionEntry {
     last_machine: Option<String>,
     locked_by: Option<LockInfo>,
     open_here: bool,
+    archived: bool,
 }
 
 #[derive(Serialize)]
@@ -318,6 +321,11 @@ fn list_sessions(state: State<AppState>) -> Vec<SessionEntry> {
     let hashes = config::load_json::<sync::SyncState>(&state.state_path())
         .unwrap_or_default()
         .hashes;
+    let archived: HashSet<String> = archive::load_all(&archive::dir(&state.data_dir))
+        .into_iter()
+        .filter(|(_, m)| m.archived)
+        .map(|(id, _)| id)
+        .collect();
 
     for local in locals {
         let identity = state.index.project_identity(&local.cwd);
@@ -326,6 +334,7 @@ fn list_sessions(state: State<AppState>) -> Vec<SessionEntry> {
             .as_ref()
             .is_some_and(|(m, _, _)| hashes.get(&format!("s:{}", local.id)) == Some(&m.hash));
         entries.push(SessionEntry {
+            archived: archived.contains(&local.id),
             open_here: open.contains(&local.id),
             locked_by: locks.get(&local.id).cloned(),
             last_machine: remote_meta.map(|(m, _, _)| m.machine_name),
@@ -344,6 +353,7 @@ fn list_sessions(state: State<AppState>) -> Vec<SessionEntry> {
     }
     for (id, (meta, project, mapping)) in remote {
         entries.push(SessionEntry {
+            archived: archived.contains(&id),
             open_here: false,
             locked_by: locks.get(&id).cloned(),
             last_machine: Some(meta.machine_name),
@@ -490,6 +500,24 @@ fn open_session_blocking(
     })
 }
 
+/// Archives or restores a conversation, then spreads it with a sync.
+#[tauri::command]
+fn set_archived(
+    app: AppHandle,
+    state: State<AppState>,
+    session_id: String,
+    archived: bool,
+) -> CmdResult<()> {
+    check_session_id(&session_id)?;
+    archive::set(&archive::dir(&state.data_dir), &session_id, archived).map_err(err)?;
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        state.run_full_sync(&app);
+        let _ = app.emit("sessions-changed", ());
+    });
+    Ok(())
+}
+
 #[tauri::command]
 fn pty_write(state: State<AppState>, id: u32, data: String) -> CmdResult<()> {
     state.ptys.write(id, &data).map_err(err)
@@ -621,6 +649,7 @@ pub fn run() {
             rules_keys,
             get_quota,
             save_project_rules,
+            set_archived,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

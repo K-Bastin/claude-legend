@@ -50,6 +50,7 @@ interface SessionEntry {
   lastMachine: string | null;
   lockedBy: LockInfo | null;
   openHere: boolean;
+  archived: boolean;
 }
 
 interface SyncReport {
@@ -106,6 +107,8 @@ let quota: { rateLimits: { five_hour?: RateLimit; seven_day?: RateLimit }; updat
 /** Projects that have rules, see openRules. */
 let rulesKeys = new Set<string>();
 let lastReport: SyncReport | null = null;
+/** The list shows archived conversations instead of the others. */
+let showArchived = false;
 let syncing = false;
 const tabs: Tab[] = [];
 let activeTab: Tab | null = null;
@@ -222,13 +225,26 @@ async function refreshSessions() {
 function renderSessions() {
   const list = $("#session-list");
   const query = $<HTMLInputElement>("#search").value.trim().toLowerCase();
+  const archivedCount = sessions.filter((s) => s.archived).length;
+  if (!archivedCount) showArchived = false;
   const visible = sessions.filter(
-    (s) => !query || `${s.title} ${s.firstPrompt} ${s.projectName} ${s.gitBranch ?? ""}`.toLowerCase().includes(query),
+    (s) =>
+      s.archived === showArchived &&
+      (!query || `${s.title} ${s.firstPrompt} ${s.projectName} ${s.gitBranch ?? ""}`.toLowerCase().includes(query)),
   );
+  const toggle = archivedCount
+    ? el("button", {
+        className: "archive-toggle",
+        textContent: showArchived ? "← Conversations" : `Archives (${archivedCount})`,
+        onclick: () => {
+          showArchived = !showArchived;
+          renderSessions();
+        },
+      })
+    : null;
   if (!visible.length) {
-    list.replaceChildren(
-      el("div", { className: "empty-list", textContent: query ? "Aucun résultat." : "Aucune conversation pour l'instant." }),
-    );
+    const empty = query ? "Aucun résultat." : showArchived ? "Aucune conversation archivée." : "Aucune conversation pour l'instant.";
+    list.replaceChildren(el("div", { className: "empty-list", textContent: empty }), ...(toggle ? [toggle] : []));
     return;
   }
 
@@ -278,13 +294,24 @@ function renderSessions() {
       const meta = [relativeTime(s.updatedAt), s.gitBranch, s.lastMachine && s.location === "remote" ? s.lastMachine : null]
         .filter(Boolean)
         .join(" · ");
+      // A span: the session item is itself a button.
+      const archiveBtn = el("span", {
+        className: "session-action",
+        role: "button",
+        title: s.archived ? "Restaurer la conversation" : "Archiver la conversation (masquée sur tous les PC, rien n'est supprimé)",
+        innerHTML: icon(s.archived ? "restore" : "archive"),
+      });
+      archiveBtn.onclick = (e) => {
+        e.stopPropagation();
+        setArchived(s, !s.archived);
+      };
       const item = el(
         "button",
         {
           className: `session ${s.location}${s.id === activeSession ? " active" : ""}`,
           title: s.firstPrompt,
         },
-        el("div", { className: "title" }, el("span", { className: "t", textContent: s.title }), ...badges),
+        el("div", { className: "title" }, el("span", { className: "t", textContent: s.title }), ...badges, archiveBtn),
         el("div", { className: "meta", textContent: meta }),
       );
       item.onclick = () => resumeSession(s);
@@ -298,7 +325,19 @@ function renderSessions() {
     });
     nodes.push(el("div", { className: "project" }, header, ...items));
   }
+  if (toggle) nodes.push(toggle);
   list.replaceChildren(...nodes);
+}
+
+async function setArchived(s: SessionEntry, archived: boolean) {
+  try {
+    await invoke("set_archived", { sessionId: s.id, archived });
+    s.archived = archived;
+    renderSessions();
+    toast(archived ? `« ${s.title} » archivée. Retrouve-la dans les archives en bas de la liste.` : `« ${s.title} » restaurée.`);
+  } catch (e) {
+    toast(`${e}`, "error");
+  }
 }
 
 function renderStatus() {
