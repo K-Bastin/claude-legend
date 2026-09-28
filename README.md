@@ -61,9 +61,9 @@ prises en compte au prochain lancement ou à la prochaine reprise d'une conversa
 
 Au lancement, l'application vérifie la dernière release publiée sur GitHub et propose de l'installer
 (désactivable dans ⚙ → Mises à jour, qui permet aussi de vérifier à la demande).
-Sous Windows et en AppImage, l'installation se fait dans l'application puis elle redémarre, en
-rouvrant les conversations ouvertes ; les mises à jour sont signées et leur signature est vérifiée
-avant installation. Installée par paquet (.rpm / .deb), l'application propose de télécharger le
+L'installation se fait dans l'application, qui redémarre ensuite en rouvrant les conversations
+ouvertes ; les mises à jour sont signées et leur signature est vérifiée avant installation.
+Installée par paquet (.rpm / .deb), le mot de passe administrateur est demandé pour installer le
 nouveau paquet.
 
 ### Thème clair / sombre
