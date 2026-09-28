@@ -247,16 +247,21 @@ fn save_project_rules(
 #[serde(rename_all = "camelCase")]
 struct UpdateSupport {
     version: String,
-    /// The updater can replace the app itself: Windows installers and
-    /// AppImage. .deb/.rpm installs belong to the package manager.
+    /// The updater can install the update itself. It knows how only when the
+    /// build recorded its bundle type (not for binaries built by hand).
     self_update: bool,
+    /// Installed from a .deb/.rpm: installing asks for the admin password.
+    package: bool,
 }
 
 #[tauri::command]
 fn update_support(app: AppHandle) -> UpdateSupport {
+    use tauri::utils::{config::BundleType, platform::bundle_type};
+    let bundle = bundle_type();
     UpdateSupport {
         version: app.package_info().version.to_string(),
-        self_update: cfg!(windows) || std::env::var_os("APPIMAGE").is_some(),
+        self_update: bundle.is_some(),
+        package: matches!(bundle, Some(BundleType::Deb | BundleType::Rpm)),
     }
 }
 
