@@ -1,5 +1,6 @@
 mod archive;
 mod config;
+mod conflicts;
 mod paths;
 mod pty;
 mod quota;
@@ -88,7 +89,7 @@ impl AppState {
             machine: &self.machine,
             machine_name: &settings.machine_name,
             state_path: self.state_path(),
-            conflicts_dir: self.data_dir.join("conflicts"),
+            conflicts_dir: conflicts::dir(&self.data_dir),
             rules_dir: rules::dir(&self.data_dir),
             archive_dir: archive::dir(&self.data_dir),
             index: &self.index,
@@ -518,6 +519,26 @@ fn set_archived(
     Ok(())
 }
 
+/// Versions set aside by sync conflicts, newest first.
+#[tauri::command]
+fn list_conflicts(state: State<AppState>) -> Vec<conflicts::Conflict> {
+    conflicts::list(&conflicts::dir(&state.data_dir))
+}
+
+/// Brings a set-aside version back as a new conversation; returns its id.
+#[tauri::command]
+fn restore_conflict(app: AppHandle, state: State<AppState>, file: String) -> CmdResult<String> {
+    let id = conflicts::restore(&conflicts::dir(&state.data_dir), &file, &state.index)
+        .map_err(|e| format!("{e:#}"))?;
+    let _ = app.emit("sessions-changed", ());
+    Ok(id)
+}
+
+#[tauri::command]
+fn delete_conflict(state: State<AppState>, file: String) -> CmdResult<()> {
+    conflicts::delete(&conflicts::dir(&state.data_dir), &file).map_err(err)
+}
+
 #[tauri::command]
 fn pty_write(state: State<AppState>, id: u32, data: String) -> CmdResult<()> {
     state.ptys.write(id, &data).map_err(err)
@@ -650,6 +671,9 @@ pub fn run() {
             get_quota,
             save_project_rules,
             set_archived,
+            list_conflicts,
+            restore_conflict,
+            delete_conflict,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

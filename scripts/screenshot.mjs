@@ -88,6 +88,19 @@ function seedFakeData(home, claudeHome, dataDir) {
     utimesSync(file, mtime, mtime);
   });
 
+  // A version of the first conversation set aside by a sync conflict, in the
+  // machine-independent form the sync keeps.
+  const conflicts = join(dataDir, "conflicts");
+  mkdirSync(conflicts, { recursive: true });
+  const root = "{{claude-legend:root}}";
+  writeFileSync(
+    join(conflicts, `00000000-0000-4000-8000-000000000000-${now - 2 * HOUR}-distant.jsonl`),
+    [
+      { type: "user", cwd: root, sessionId: "00000000-0000-4000-8000-000000000000", message: { role: "user", content: "Refonte de la synchronisation" } },
+      { type: "user", cwd: root, sessionId: "00000000-0000-4000-8000-000000000000", message: { role: "user", content: "Suite écrite sur l'autre PC" } },
+    ].map((l) => JSON.stringify(l)).join("\n") + "\n",
+  );
+
   const inSeconds = (ms) => Math.round((now + ms) / 1000);
   mkdirSync(dataDir, { recursive: true });
   writeFileSync(
