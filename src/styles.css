@@ -43,6 +43,12 @@
   box-sizing: border-box;
 }
 
+/* Author display rules (dialog label { display: flex }, #terminals { display: grid }…)
+   would otherwise override the hidden attribute. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
