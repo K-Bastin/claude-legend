@@ -84,6 +84,7 @@ interface Tab {
   tabEl: HTMLDivElement;
   exited: boolean;
   activity: boolean;
+  resize: ResizeObserver;
 }
 
 // ---------- state ----------
@@ -440,6 +441,11 @@ function createTab(title: string, cwd: string, sessionId: string | null): Tab {
   term.open(container);
 
   const tabEl = el("div", { className: "tab" });
+  const resize = new ResizeObserver(() => {
+    // Terminals parked in the hidden holder have no size to fit to.
+    if (container.offsetParent !== null) fit.fit();
+  });
+  resize.observe(container);
   const tab: Tab = {
     key: ++tabSeq,
     ptyId: null,
@@ -452,6 +458,7 @@ function createTab(title: string, cwd: string, sessionId: string | null): Tab {
     tabEl,
     exited: false,
     activity: false,
+    resize,
   };
   tabEl.onclick = () => activateTab(tab);
   tabEl.onauxclick = (e) => e.button === 1 && closeTab(tab);
@@ -477,11 +484,6 @@ function createTab(title: string, cwd: string, sessionId: string | null): Tab {
       renderTab(tab);
     }
   });
-  new ResizeObserver(() => {
-    // Terminals parked in the hidden holder have no size to fit to.
-    if (container.offsetParent !== null) fit.fit();
-  }).observe(container);
-
   tabs.push(tab);
   activateTab(tab);
   return tab;
@@ -516,6 +518,7 @@ function activateTab(tab: Tab) {
 
 function closeTab(tab: Tab) {
   if (tab.ptyId !== null && !tab.exited) invoke("pty_kill", { id: tab.ptyId });
+  tab.resize.disconnect();
   tab.term.dispose();
   tab.el.remove();
   tab.tabEl.remove();
@@ -680,6 +683,8 @@ function makeDraggable(handle: HTMLElement, label: () => string, onDrop: (pane: 
 async function launch(tab: Tab, sessionId: string | null): Promise<boolean> {
   const channel = new Channel<PtyEvent>();
   channel.onmessage = (event) => {
+    // Output still in flight when the tab was closed.
+    if (!tabs.includes(tab)) return;
     if (event.kind === "data") {
       tab.term.write(event.data);
       if (!panes.includes(tab) && !tab.activity) {
@@ -785,7 +790,15 @@ async function resumeSession(s: SessionEntry) {
     cwd = await mapProject(s);
     if (!cwd) return;
   }
-  const lock = info.syncEnabled ? await invoke<LockInfo | null>("lock_status", { sessionId: s.id }) : null;
+  let lock: LockInfo | null = null;
+  if (info.syncEnabled) {
+    try {
+      lock = await invoke<LockInfo | null>("lock_status", { sessionId: s.id });
+    } catch (e) {
+      // Offline or target unreachable: the conversation must still open.
+      toast(`Impossible de vérifier si la conversation est ouverte sur un autre PC : ${e}`, "warn", 8000);
+    }
+  }
   if (lock) {
     const choice = await ask(
       `Cette conversation est actuellement ouverte sur « ${lock.machineName} » (depuis ${relativeTime(lock.since)}).\n\n` +
@@ -1143,6 +1156,8 @@ async function boot() {
   });
 
   document.addEventListener("keydown", (e) => {
+    // Keys typed in a terminal were already handled by handleKey.
+    if ((e.target as Element | null)?.closest?.(".xterm")) return;
     if (handlePaneShortcut(e)) return e.preventDefault();
     const ctrl = e.ctrlKey || e.metaKey;
     if (ctrl && e.shiftKey && e.key.toLowerCase() === "t") {
