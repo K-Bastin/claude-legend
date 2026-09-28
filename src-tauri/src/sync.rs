@@ -1007,6 +1007,10 @@ mod tests {
     /// `SyncTarget` as JSON (password in `CL_TEST_SECRET`); a unique
     /// sub-directory keeps runs apart.
     fn remote(shared: &Path) -> Remote {
+        remote_with(shared, None)
+    }
+
+    fn remote_with(shared: &Path, passphrase: Option<&str>) -> Remote {
         use crate::config::SyncTarget;
         let run = shared
             .parent()
@@ -1057,7 +1061,11 @@ mod tests {
                 path: shared.to_string_lossy().into_owned(),
             },
         };
-        Remote::new(target, std::env::var("CL_TEST_SECRET").ok())
+        Remote::new(
+            target,
+            std::env::var("CL_TEST_SECRET").ok(),
+            passphrase.map(str::to_string),
+        )
     }
 
     fn syncer<'a>(
@@ -1179,9 +1187,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// Two machines with different project paths hand a session back and forth.
+    /// Two machines with different project paths hand a session back and
+    /// forth, through a plain then an end-to-end encrypted target. A single
+    /// test, as both runs change CLAUDE_CONFIG_DIR.
     #[test]
     fn session_roundtrip_between_machines() {
+        roundtrip(None);
+        roundtrip(Some("correct horse battery"));
+    }
+
+    fn roundtrip(passphrase: Option<&str>) {
         let tmp = std::env::temp_dir().join(format!("cl-test-{}", uuid::Uuid::new_v4()));
         let shared = tmp.join("shared");
         let (home_a, home_b) = (tmp.join("claude-a"), tmp.join("claude-b"));
@@ -1215,7 +1230,13 @@ mod tests {
         )
         .unwrap();
         let (ma, mb) = (Machine { id: "A".into() }, Machine { id: "B".into() });
-        let (mut ra, mut rb) = (remote(&shared), remote(&shared));
+        let (mut ra, mut rb) = (
+            remote_with(&shared, passphrase),
+            remote_with(&shared, passphrase),
+        );
+        if passphrase.is_some() {
+            ra.set_encryption(true).unwrap();
+        }
         let index_a = SessionIndex::default();
         let report = syncer(&mut ra, &ma, "pc-a", &tmp.join("data-a"), &index_a).sync_all();
         assert_eq!(report.errors, Vec::<String>::new());
@@ -1301,6 +1322,21 @@ mod tests {
         assert!(sb.foreign_lock(id).unwrap().is_some());
         sa.release_lock(id).unwrap();
         assert!(sb.foreign_lock(id).unwrap().is_none());
+
+        if passphrase.is_some() {
+            // Sealed on disk, and a machine without the passphrase stops
+            // instead of reading or writing anything.
+            if std::env::var("CL_TEST_SYNC_TARGET").is_err() {
+                let raw = std::fs::read(shared.join(format!(
+                    "claude-legend/projects/local-app/sessions/{id}.jsonl"
+                )))
+                .unwrap();
+                assert!(crate::store::crypto::is_sealed(&raw));
+            }
+            let mut locked = remote(&shared);
+            let report = syncer(&mut locked, &ma, "pc-a", &tmp.join("data-a"), &index_a).sync_all();
+            assert!(report.errors[0].contains("chiffrées"), "{report:?}");
+        }
 
         std::env::remove_var("CLAUDE_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
