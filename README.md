@@ -49,6 +49,12 @@ Gestionnaire d'identifiants sous Windows), jamais dans les fichiers de réglages
 
 Glisser-déposer un fichier dans le terminal insère son chemin.
 
+### Thème clair / sombre
+
+Le bouton ☀/☾ de la barre latérale bascule entre clair et sombre ; les réglages proposent aussi
+« Comme le système ». Claude Code choisit lui-même une partie de ses couleurs : en thème clair,
+passe-le aussi en clair avec `/config` → *Theme*.
+
 ### Écran partagé
 
 Les boutons à droite des onglets affichent 1, 2 (côte à côte ou empilés), 3 ou 4 conversations

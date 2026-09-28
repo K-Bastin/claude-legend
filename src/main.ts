@@ -11,6 +11,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { applyTheme, loadThemeMode, onSystemThemeChange, saveThemeMode, TERMINAL_THEMES, type ThemeMode } from "./theme";
 import { fillSyncForm, missingSyncField, readSyncForm, updateSyncVisibility, type SyncTarget } from "./sync-form";
 
 // ---------- types ----------
@@ -97,6 +98,9 @@ let syncing = false;
 const tabs: Tab[] = [];
 let activeTab: Tab | null = null;
 let tabSeq = 0;
+// Applied before anything renders to avoid a flash of the wrong theme.
+let themeMode: ThemeMode = loadThemeMode();
+let theme = applyTheme(themeMode);
 let layout: LayoutId = "1";
 /** Tab shown in each pane of the current layout. */
 let panes: (Tab | null)[] = [null];
@@ -350,14 +354,7 @@ function createTab(title: string, cwd: string, sessionId: string | null): Tab {
     fontSize: settings.fontSize,
     scrollback: 20000,
     macOptionIsMeta: true,
-    theme: {
-      background: "#1a1918",
-      foreground: "#ece8e1",
-      cursor: "#d97757",
-      selectionBackground: "#d9775755",
-      black: "#1a1918",
-      brightBlack: "#6b645c",
-    },
+    theme: TERMINAL_THEMES[theme],
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
@@ -816,6 +813,22 @@ function sendRaw(tab: Tab, data: string) {
   if (tab.ptyId !== null && !tab.exited) invoke("pty_write", { id: tab.ptyId, data }).catch(() => {});
 }
 
+// ---------- theme ----------
+
+function setThemeMode(mode: ThemeMode) {
+  themeMode = mode;
+  saveThemeMode(mode);
+  refreshTheme();
+}
+
+function refreshTheme() {
+  theme = applyTheme(themeMode);
+  for (const t of tabs) t.term.options.theme = TERMINAL_THEMES[theme];
+  const button = $("#btn-theme");
+  button.textContent = theme === "dark" ? "☾" : "☀";
+  button.title = theme === "dark" ? "Passer en thème clair" : "Passer en thème sombre";
+}
+
 // ---------- settings ----------
 
 function settingsField(name: string) {
@@ -841,6 +854,7 @@ async function openSettings() {
   renderFingerprint();
   showTestResult("");
   settingsField("machineName").value = settings.machineName;
+  settingsField("theme").value = themeMode;
   settingsField("claudePath").value = settings.claudePath ?? "";
   settingsField("extraArgs").value = settings.extraArgs;
   settingsField("fontSize").value = String(settings.fontSize);
@@ -917,6 +931,7 @@ async function saveSettingsFromForm() {
   };
   const secret = settingsField("secret").value || null;
   settingsField("secret").value = "";
+  setThemeMode(settingsField("theme").value as ThemeMode);
   try {
     await invoke("save_settings", { settings: next, secret });
     settings = next;
@@ -953,6 +968,9 @@ async function boot() {
   $("#btn-new-welcome").onclick = () => startNewSession();
   $("#btn-sync").onclick = syncNow;
   $("#btn-settings").onclick = openSettings;
+  $("#btn-theme").onclick = () => setThemeMode(theme === "dark" ? "light" : "dark");
+  onSystemThemeChange(() => themeMode === "system" && refreshTheme());
+  refreshTheme();
   $("#search").oninput = renderSessions;
   const settingsForm = $<HTMLFormElement>("#settings-form");
   $("#pick-sync-dir").onclick = async () => {
