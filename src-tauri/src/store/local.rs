@@ -15,16 +15,14 @@ impl LocalStore {
         }
     }
 
-    fn path(&self, rel: &str) -> PathBuf {
-        rel.split('/')
-            .filter(|s| !s.is_empty())
-            .fold(self.root.clone(), |p, s| p.join(s))
+    fn path(&self, rel: &str) -> anyhow::Result<PathBuf> {
+        paths::safe_join(&self.root, rel).ok_or_else(|| anyhow::anyhow!("chemin refusé : {rel}"))
     }
 }
 
 impl Store for LocalStore {
     fn read(&mut self, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
-        match std::fs::read(self.path(path)) {
+        match std::fs::read(self.path(path)?) {
             Ok(data) => Ok(Some(data)),
             Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e.into()),
@@ -32,19 +30,19 @@ impl Store for LocalStore {
     }
 
     fn write(&mut self, path: &str, data: &[u8]) -> anyhow::Result<()> {
-        paths::write_atomic(&self.path(path), data)?;
+        paths::write_atomic(&self.path(path)?, data)?;
         Ok(())
     }
 
     fn delete(&mut self, path: &str) -> anyhow::Result<()> {
-        match std::fs::remove_file(self.path(path)) {
+        match std::fs::remove_file(self.path(path)?) {
             Err(e) if e.kind() != ErrorKind::NotFound => Err(e.into()),
             _ => Ok(()),
         }
     }
 
     fn list(&mut self, dir: &str) -> anyhow::Result<Vec<Entry>> {
-        let entries = match std::fs::read_dir(self.path(dir)) {
+        let entries = match std::fs::read_dir(self.path(dir)?) {
             Ok(entries) => entries,
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e.into()),

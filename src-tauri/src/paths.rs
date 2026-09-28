@@ -133,6 +133,20 @@ pub fn localize(text: &str, root: &str, home: &str, escape: bool) -> String {
     text.replace(ROOT_TOKEN, &root).replace(HOME_TOKEN, &home)
 }
 
+/// Joins a `/`-separated relative path coming from the sync target to `base`,
+/// or `None` when a segment could leave `base`: `..`, `.`, a drive or stream
+/// (`:`), a Windows separator or a NUL.
+pub fn safe_join(base: &Path, rel: &str) -> Option<PathBuf> {
+    let mut out = base.to_path_buf();
+    for segment in rel.split('/').filter(|s| !s.is_empty()) {
+        if segment == "." || segment == ".." || segment.contains(['\\', ':', '\0']) {
+            return None;
+        }
+        out.push(segment);
+    }
+    Some(out)
+}
+
 pub fn is_text_file(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
@@ -187,6 +201,30 @@ mod tests {
             neutralize(&win, r"C:\Users\kb\dev\app", r"C:\Users\kb", true),
             neutral
         );
+    }
+
+    #[test]
+    fn safe_join_stays_under_base() {
+        let base = Path::new("/data/base");
+        assert_eq!(
+            safe_join(base, "a/b.json"),
+            Some(PathBuf::from("/data/base/a/b.json"))
+        );
+        assert_eq!(
+            safe_join(base, "/a//b"),
+            Some(PathBuf::from("/data/base/a/b"))
+        );
+        for bad in [
+            "..",
+            "a/../../x",
+            "./a",
+            r"..\..\x",
+            "C:x",
+            "a/b:stream",
+            "a\0b",
+        ] {
+            assert_eq!(safe_join(base, bad), None, "{bad}");
+        }
     }
 
     #[test]
