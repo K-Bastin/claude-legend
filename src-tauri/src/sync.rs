@@ -22,7 +22,7 @@
 
 use crate::config::{load_json, save_json, Machine};
 use crate::paths::{self, localize, neutralize, write_atomic};
-use crate::sessions::{LocalSession, ProjectIdentity, SessionIndex};
+use crate::sessions::{is_project_key, is_session_id, LocalSession, ProjectIdentity, SessionIndex};
 use crate::store::{join, Entry, Remote};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -199,12 +199,6 @@ fn rel_path(file: &Path, base: &Path) -> Option<String> {
     )
 }
 
-fn local_path(base: &Path, rel: &str) -> PathBuf {
-    rel.split('/')
-        .filter(|s| !s.is_empty())
-        .fold(base.to_path_buf(), |p, s| p.join(s))
-}
-
 fn project_dir(key: &str) -> String {
     format!("projects/{key}")
 }
@@ -261,18 +255,28 @@ impl<'a> Syncer<'a> {
         )
     }
 
+    /// Keys and ids read from the store become local file names and `claude`
+    /// arguments: projects whose key is not a slug matching their folder, and
+    /// sessions whose id is not a UUID matching their file, are ignored.
     pub fn build_index(&self) -> anyhow::Result<RemoteIndex> {
         let mapping_name = format!("{}.json", self.machine.id);
         let mut projects = Vec::new();
         let mut unreadable = HashSet::new();
-        for dir in self.list("projects")?.into_iter().filter(|e| e.is_dir) {
+        for dir in self
+            .list("projects")?
+            .into_iter()
+            .filter(|e| e.is_dir && is_project_key(&e.name))
+        {
             let base = project_dir(&dir.name);
             // Listing first lets unchanged files come from the cache.
             let has_rules = self
                 .list(&base)?
                 .iter()
                 .any(|e| !e.is_dir && e.name == "rules.md");
-            let Some(info) = self.read_json::<ProjectInfo>(&join(&base, "project.json"))? else {
+            let Some(info) = self
+                .read_json::<ProjectInfo>(&join(&base, "project.json"))?
+                .filter(|info| info.key == dir.name)
+            else {
                 continue;
             };
             let mapping = if self
@@ -287,11 +291,16 @@ impl<'a> Syncer<'a> {
             };
             let mut sessions = Vec::new();
             for entry in self.list(&join(&base, "sessions"))? {
-                let Some(id) = entry.name.strip_suffix(".meta.json") else {
+                let Some(id) = entry
+                    .name
+                    .strip_suffix(".meta.json")
+                    .filter(|id| is_session_id(id))
+                else {
                     continue;
                 };
-                match self.read_json(&format!("{base}/sessions/{}", entry.name))? {
-                    Some(meta) => sessions.push(meta),
+                match self.read_json::<RemoteMeta>(&format!("{base}/sessions/{}", entry.name))? {
+                    Some(meta) if meta.id == id => sessions.push(meta),
+                    Some(_) => {}
                     None => {
                         unreadable.insert(id.to_string());
                     }
@@ -307,7 +316,10 @@ impl<'a> Syncer<'a> {
         let mut locks = Vec::new();
         for entry in self.list("locks")? {
             if entry.name.ends_with(".json") {
-                if let Some(lock) = self.read_json(&format!("locks/{}", entry.name))? {
+                if let Some(lock) = self
+                    .read_json::<LockInfo>(&format!("locks/{}", entry.name))?
+                    .filter(|l| is_session_id(&l.session_id))
+                {
                     locks.push(lock);
                 }
             }
@@ -733,7 +745,9 @@ impl<'a> Syncer<'a> {
         to_remote: &dyn Fn(&str) -> String,
     ) -> anyhow::Result<()> {
         for (rel, entry) in self.walk(remote_dir)? {
-            let target = local_path(local_dir, &rel);
+            let Some(target) = paths::safe_join(local_dir, &rel) else {
+                anyhow::bail!("chemin distant refusé : {rel}");
+            };
             let text = paths::is_text_file(&target);
             let local_size = if text {
                 std::fs::read_to_string(&target)
@@ -791,8 +805,14 @@ impl<'a> Syncer<'a> {
         );
 
         for rel in rels {
+            let Some(local) = paths::safe_join(&local_dir, &rel) else {
+                report
+                    .errors
+                    .push(format!("Mémoire de {key} : chemin distant refusé : {rel}"));
+                continue;
+            };
             let changed = self.reconcile_file(
-                &local_path(&local_dir, &rel),
+                &local,
                 &join(&remote_dir, &rel),
                 remote_files.get(&rel),
                 format!("m:{key}/{rel}"),
@@ -1005,6 +1025,60 @@ mod tests {
             "{}\n",
             serde_json::json!({"type":"user","cwd":cwd,"sessionId":"s1","message":{"role":"user","content":text}})
         )
+    }
+
+    /// Keys and ids from a tampered store never reach local paths.
+    #[test]
+    fn tampered_store_entries_are_ignored() {
+        let tmp = std::env::temp_dir().join(format!("cl-test-{}", uuid::Uuid::new_v4()));
+        let root = tmp.join("shared").join("claude-legend");
+        let good = "11111111-2222-3333-4444-555555555555";
+        let write = |rel: &str, value: serde_json::Value| {
+            let file = paths::safe_join(&root, rel).unwrap();
+            crate::paths::write_atomic(&file, value.to_string().as_bytes()).unwrap();
+        };
+        let meta = |id: &str| {
+            serde_json::json!({"id": id, "projectKey": "app", "title": "t", "firstPrompt": "p",
+                "gitBranch": null, "promptCount": 1, "updatedAt": 1, "hash": "h",
+                "machineId": "X", "machineName": "x"})
+        };
+        write(
+            "projects/app/project.json",
+            serde_json::json!({"key": "app", "name": "app"}),
+        );
+        write(
+            &format!("projects/app/sessions/{good}.meta.json"),
+            meta(good),
+        );
+        write("projects/app/sessions/--resume.meta.json", meta("--resume"));
+        write(
+            "projects/app/sessions/22222222-2222-3333-4444-555555555555.meta.json",
+            meta("../../../../.bashrc"),
+        );
+        write(
+            "projects/evil/project.json",
+            serde_json::json!({"key": "../../../../.claude/CLAUDE", "name": "evil"}),
+        );
+        write(
+            "locks/x.json",
+            serde_json::json!({"sessionId": "../x", "machineId": "X", "machineName": "x", "since": 1, "heartbeat": 1}),
+        );
+
+        let mut remote = remote(&tmp.join("shared"));
+        let machine = Machine { id: "A".into() };
+        let index = SessionIndex::default();
+        let s = syncer(&mut remote, &machine, "pc-a", &tmp.join("data"), &index);
+        let built = s.build_index().unwrap();
+        assert_eq!(built.projects.len(), 1);
+        assert_eq!(built.projects[0].info.key, "app");
+        let ids: Vec<_> = built.projects[0]
+            .sessions
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(ids, [good]);
+        assert!(built.locks.is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Two machines with different project paths hand a session back and forth.
