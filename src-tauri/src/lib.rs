@@ -5,6 +5,7 @@ mod paths;
 mod pty;
 mod quota;
 mod rules;
+mod search;
 mod sessions;
 mod store;
 mod sync;
@@ -32,6 +33,7 @@ struct AppState {
     machine: Machine,
     settings: Mutex<Settings>,
     index: SessionIndex,
+    search: search::SearchIndex,
     ptys: PtyManager,
     /// pty id -> session id
     open: Mutex<HashMap<u32, String>>,
@@ -501,6 +503,17 @@ fn open_session_blocking(
     })
 }
 
+/// Conversations of this machine whose messages contain `query`.
+#[tauri::command]
+async fn search_sessions(app: AppHandle, query: String) -> CmdResult<Vec<search::Hit>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.search.search(&state.index.scan(), &query)
+    })
+    .await
+    .map_err(err)
+}
+
 /// Archives or restores a conversation, then spreads it with a sync.
 #[tauri::command]
 fn set_archived(
@@ -641,6 +654,7 @@ pub fn run() {
                 config_dir,
                 data_dir,
                 index: SessionIndex::default(),
+                search: search::SearchIndex::default(),
                 ptys: PtyManager::default(),
                 open: Mutex::new(HashMap::new()),
                 remote: Mutex::new(None),
@@ -671,6 +685,7 @@ pub fn run() {
             get_quota,
             save_project_rules,
             set_archived,
+            search_sessions,
             list_conflicts,
             restore_conflict,
             delete_conflict,
