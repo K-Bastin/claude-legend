@@ -1,6 +1,7 @@
 mod config;
 mod paths;
 mod pty;
+mod quota;
 mod rules;
 mod sessions;
 mod store;
@@ -8,7 +9,9 @@ mod sync;
 
 use config::{Machine, Settings, SyncTarget};
 use portable_pty::PtySize;
-use pty::{PtyEvent, PtyManager};
+use pty::{Launch, PtyEvent, PtyManager};
+
+pub use quota::{relay as statusline_relay, RELAY_ARG as STATUSLINE_RELAY_ARG};
 use serde::{Deserialize, Serialize};
 use sessions::SessionIndex;
 use std::cell::RefCell;
@@ -215,6 +218,12 @@ fn get_project_rules(state: State<AppState>, project_key: String) -> String {
     rules::load(&state.data_dir, &project_key)
 }
 
+/// Last plan usage reported by Claude Code, if any.
+#[tauri::command]
+fn get_quota(state: State<AppState>) -> Option<serde_json::Value> {
+    quota::load(&state.data_dir)
+}
+
 #[tauri::command]
 fn rules_keys(state: State<AppState>) -> Vec<String> {
     rules::keys_with_rules(&state.data_dir)
@@ -416,6 +425,15 @@ fn open_session_blocking(
         args.push("--append-system-prompt-file".into());
         args.push(file.to_string_lossy().into_owned());
     }
+    // Plan usage reaches the app through Claude Code's status line.
+    let mut env = Vec::new();
+    match quota::launch_options(&state.data_dir, &cwd) {
+        Ok(options) => {
+            args.extend(options.args);
+            env = options.env;
+        }
+        Err(e) => warnings.push(format!("Suivi du quota indisponible : {e:#}")),
+    }
     args.extend(settings.extra_args.split_whitespace().map(str::to_string));
 
     if let Some(Err(e)) = state.with_syncer(|s| s.acquire_lock(&session_id)) {
@@ -426,9 +444,12 @@ fn open_session_blocking(
     let pty_id = state
         .ptys
         .spawn(
-            &claude,
-            &args,
-            &cwd,
+            &Launch {
+                program: claude,
+                args,
+                cwd,
+                env,
+            },
             PtySize {
                 cols: request.cols.max(20),
                 rows: request.rows.max(5),
@@ -588,6 +609,7 @@ pub fn run() {
             update_support,
             get_project_rules,
             rules_keys,
+            get_quota,
             save_project_rules,
         ])
         .build(tauri::generate_context!())

@@ -805,3 +805,54 @@ dialog {
   outline: 1px solid var(--accent);
   border-color: var(--accent);
 }
+
+/* ---------- quota ---------- */
+
+.quota {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 4px 0 2px;
+}
+.quota-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: default;
+}
+.quota-label {
+  flex: 0 0 68px;
+}
+.quota-bar {
+  flex: 1;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--bg-active);
+  overflow: hidden;
+}
+.quota-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--ok);
+}
+.quota-fill.warn {
+  background: var(--warn);
+}
+.quota-fill.danger {
+  background: var(--danger);
+}
+.quota-pct {
+  flex: 0 0 32px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.quota-reset {
+  flex: 0 0 74px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.quota-empty {
+  opacity: 0.8;
+}
