@@ -11,8 +11,10 @@ const AUTO_CHECK_KEY = "claude-legend:auto-update-check";
 
 export interface UpdateSupport {
   version: string;
-  /** False for .deb/.rpm installs, which the package manager must update. */
+  /** False only for builds whose install type is unknown (built by hand). */
   selfUpdate: boolean;
+  /** Installed from a .deb/.rpm: installing asks for the admin password. */
+  package: boolean;
 }
 
 /** Called around installing, so open sessions are restored after the restart. */
@@ -122,7 +124,7 @@ function renderNotes(markdown: string): Node[] {
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
 
 export async function showUpdate(update: Update, hooks: InstallHooks) {
-  const { selfUpdate } = await updateSupport();
+  const { selfUpdate, package: isPackage } = await updateSupport();
   const dialog = $<HTMLDialogElement>("#update-dialog");
   const install = $<HTMLButtonElement>("#update-install");
   const buttons = [install, $<HTMLButtonElement>("#update-later")];
@@ -134,9 +136,12 @@ export async function showUpdate(update: Update, hooks: InstallHooks) {
   const notes = $("#update-notes");
   notes.replaceChildren(...renderNotes(update.body ?? ""));
   releaseNotes(update.version, update.body).then((body) => notes.replaceChildren(...renderNotes(body)));
-  $("#update-hint").textContent = selfUpdate
-    ? "Les conversations ouvertes seront fermées puis rouvertes automatiquement après le redémarrage."
-    : "Application installée par paquet (.rpm / .deb) : télécharge le nouveau paquet et installe-le comme le précédent.";
+  const reopen = "Les conversations ouvertes seront fermées puis rouvertes automatiquement après le redémarrage.";
+  $("#update-hint").textContent = !selfUpdate
+    ? "Type d'installation inconnu : télécharge la nouvelle version depuis GitHub."
+    : isPackage
+      ? `Le mot de passe administrateur sera demandé pour installer le paquet. ${reopen}`
+      : reopen;
   install.textContent = selfUpdate ? "Installer et redémarrer" : "Télécharger";
   progress.hidden = true;
   error.textContent = "";

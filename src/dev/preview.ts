@@ -162,7 +162,7 @@ export function installPreview() {
           rules[a.projectKey] = a.rules;
           return null;
         case "update_support":
-          return { version: "0.2.0", selfUpdate: true };
+          return { version: "0.2.0", selfUpdate: true, package: true };
         case "plugin:updater|check":
           return {
             rid: 1,
