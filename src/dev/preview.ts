@@ -60,6 +60,8 @@ function session(
   };
 }
 
+const rules: Record<string, string> = { "local-claude-legend": "Réponds en français.\nLes tests sont en anglais." };
+
 const ptys = new Map<number, FakePty>();
 let nextPty = 1;
 
@@ -152,6 +154,13 @@ export function installPreview() {
           pty?.channel.onmessage({ kind: "exit", code: 0 });
           return null;
         }
+        case "rules_keys":
+          return Object.keys(rules).filter((k) => rules[k].trim());
+        case "get_project_rules":
+          return rules[a.projectKey] ?? "";
+        case "save_project_rules":
+          rules[a.projectKey] = a.rules;
+          return null;
         case "update_support":
           return { version: "0.2.0", selfUpdate: true };
         case "plugin:updater|check":
