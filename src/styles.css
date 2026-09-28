@@ -74,11 +74,21 @@ button.primary:hover {
   filter: brightness(1.08);
 }
 button.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   background: none;
   border: none;
-  padding: 4px 7px;
-  font-size: 16px;
+  border-radius: 6px;
   color: var(--muted);
+}
+button.icon .ico {
+  display: block;
+  width: 16px;
+  height: 16px;
 }
 button.icon:hover {
   color: var(--text);
@@ -126,7 +136,7 @@ input:focus {
 .brand {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 2px;
   padding: 10px 10px 6px 14px;
 }
 .brand .logo {
@@ -134,6 +144,7 @@ input:focus {
   font-size: 18px;
 }
 .brand .name {
+  margin-left: 6px;
   font-weight: 600;
 }
 .spacer {
@@ -171,9 +182,13 @@ input:focus {
   white-space: nowrap;
 }
 .project-header button.icon {
-  font-size: 14px;
-  padding: 0 5px;
+  width: 22px;
+  height: 22px;
   visibility: hidden;
+}
+.project-header button.icon .ico {
+  width: 14px;
+  height: 14px;
 }
 .project:hover .project-header button.icon {
   visibility: visible;
