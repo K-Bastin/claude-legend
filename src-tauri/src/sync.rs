@@ -11,6 +11,7 @@
 //! projects/<key>/memory/…
 //! file-history/<id>/…                          checkpoints used by /rewind
 //! locks/<id>.json
+//! archive/<id>.json                            archived or restored, see crate::archive
 //! ```
 //! Each file is only ever written by one machine at a time, except
 //! sessions and memory, which are reconciled with a three-way comparison
@@ -20,6 +21,7 @@
 //! a network hiccup can never make a remote session look missing and get
 //! overwritten.
 
+use crate::archive;
 use crate::config::{load_json, save_json, Machine};
 use crate::paths::{self, localize, neutralize, write_atomic};
 use crate::sessions::{is_project_key, is_session_id, LocalSession, ProjectIdentity, SessionIndex};
@@ -144,6 +146,8 @@ pub struct Syncer<'a> {
     pub conflicts_dir: PathBuf,
     /// Local copies of the project rules.
     pub rules_dir: PathBuf,
+    /// Local archive markers, see [`crate::archive`].
+    pub archive_dir: PathBuf,
     pub index: &'a SessionIndex,
     /// Sessions currently running here: never overwritten from the remote.
     pub open_sessions: HashSet<String>,
@@ -197,6 +201,14 @@ fn rel_path(file: &Path, base: &Path) -> Option<String> {
             .collect::<Vec<_>>()
             .join("/"),
     )
+}
+
+fn archived_ids(markers: &HashMap<String, archive::Marker>) -> HashSet<String> {
+    markers
+        .iter()
+        .filter(|(_, m)| m.archived)
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 fn project_dir(key: &str) -> String {
@@ -415,6 +427,7 @@ impl<'a> Syncer<'a> {
         };
         let mut state = self.load_state();
 
+        let archived = self.sync_archive(&mut report);
         let locals = self.index.scan();
         let local_ids: HashSet<String> = locals.iter().map(|s| s.id.clone()).collect();
         let mut keys = HashSet::new();
@@ -434,7 +447,8 @@ impl<'a> Syncer<'a> {
             };
             keys.insert(project.info.key.clone());
             for meta in &project.sessions {
-                if local_ids.contains(&meta.id) {
+                // Archived conversations are only fetched once restored.
+                if local_ids.contains(&meta.id) || archived.contains(&meta.id) {
                     continue;
                 }
                 match self.pull(&project.info.key, meta, local_root) {
@@ -883,6 +897,59 @@ impl<'a> Syncer<'a> {
         Ok(Some(push))
     }
 
+    // ---------- archive ----------
+
+    /// Reconciles archive markers, the most recent winning on both sides.
+    /// Returns the ids archived once reconciled.
+    fn sync_archive(&self, report: &mut SyncReport) -> HashSet<String> {
+        let mut markers = archive::load_all(&self.archive_dir);
+        let remote = match self.list("archive") {
+            Ok(entries) => entries,
+            Err(e) => {
+                report.errors.push(format!("Archives : {e:#}"));
+                return archived_ids(&markers);
+            }
+        };
+        let remote_ids: HashSet<String> = remote
+            .iter()
+            .filter_map(|e| e.name.strip_suffix(".json"))
+            .filter(|id| is_session_id(id))
+            .map(str::to_string)
+            .collect();
+        let ids: HashSet<String> = markers
+            .keys()
+            .cloned()
+            .chain(remote_ids.iter().cloned())
+            .collect();
+        for id in ids {
+            let path = format!("archive/{id}.json");
+            let result = (|| -> anyhow::Result<()> {
+                let remote_marker = if remote_ids.contains(&id) {
+                    self.read_json::<archive::Marker>(&path)?
+                } else {
+                    None
+                };
+                match archive::newest(markers.get(&id).copied(), remote_marker) {
+                    Some((marker, true)) => {
+                        self.write_json(&path, &marker)?;
+                        report.pushed += 1;
+                    }
+                    Some((marker, false)) => {
+                        archive::save(&self.archive_dir, &id, &marker)?;
+                        markers.insert(id.clone(), marker);
+                        report.pulled += 1;
+                    }
+                    None => {}
+                }
+                Ok(())
+            })();
+            if let Err(e) = result {
+                report.errors.push(format!("Archives : {e:#}"));
+            }
+        }
+        archived_ids(&markers)
+    }
+
     // ---------- rules ----------
 
     /// Syncs project rules for every project known to the store. Rules of a
@@ -940,6 +1007,10 @@ mod tests {
     /// `SyncTarget` as JSON (password in `CL_TEST_SECRET`); a unique
     /// sub-directory keeps runs apart.
     fn remote(shared: &Path) -> Remote {
+        remote_with(shared, None)
+    }
+
+    fn remote_with(shared: &Path, passphrase: Option<&str>) -> Remote {
         use crate::config::SyncTarget;
         let run = shared
             .parent()
@@ -990,7 +1061,11 @@ mod tests {
                 path: shared.to_string_lossy().into_owned(),
             },
         };
-        Remote::new(target, std::env::var("CL_TEST_SECRET").ok())
+        Remote::new(
+            target,
+            std::env::var("CL_TEST_SECRET").ok(),
+            passphrase.map(str::to_string),
+        )
     }
 
     fn syncer<'a>(
@@ -1008,6 +1083,7 @@ mod tests {
             state_path: data.join("state.json"),
             conflicts_dir: data.join("conflicts"),
             rules_dir: data.join("rules"),
+            archive_dir: data.join("archive"),
             index,
             open_sessions: HashSet::new(),
             fresh_index: RefCell::new(None),
@@ -1025,6 +1101,36 @@ mod tests {
             "{}\n",
             serde_json::json!({"type":"user","cwd":cwd,"sessionId":"s1","message":{"role":"user","content":text}})
         )
+    }
+
+    /// Archiving and restoring spread between machines, the latest winning.
+    #[test]
+    fn archive_markers_follow_the_latest_change() {
+        let tmp = std::env::temp_dir().join(format!("cl-test-{}", uuid::Uuid::new_v4()));
+        let id = "11111111-2222-3333-4444-555555555555";
+        let (ma, mb) = (Machine { id: "A".into() }, Machine { id: "B".into() });
+        let (mut ra, mut rb) = (remote(&tmp.join("shared")), remote(&tmp.join("shared")));
+        let index = SessionIndex::default();
+        let (dir_a, dir_b) = (tmp.join("data-a/archive"), tmp.join("data-b/archive"));
+
+        archive::set(&dir_a, id, true).unwrap();
+        let archived = syncer(&mut ra, &ma, "a", &tmp.join("data-a"), &index)
+            .sync_archive(&mut SyncReport::default());
+        assert!(archived.contains(id));
+        let archived = syncer(&mut rb, &mb, "b", &tmp.join("data-b"), &index)
+            .sync_archive(&mut SyncReport::default());
+        assert!(archived.contains(id));
+        assert!(archive::load_all(&dir_b)[id].archived);
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        archive::set(&dir_b, id, false).unwrap();
+        syncer(&mut rb, &mb, "b", &tmp.join("data-b"), &index)
+            .sync_archive(&mut SyncReport::default());
+        let archived = syncer(&mut ra, &ma, "a", &tmp.join("data-a"), &index)
+            .sync_archive(&mut SyncReport::default());
+        assert!(archived.is_empty());
+        assert!(!archive::load_all(&dir_a)[id].archived);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Keys and ids from a tampered store never reach local paths.
@@ -1081,9 +1187,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// Two machines with different project paths hand a session back and forth.
+    /// Two machines with different project paths hand a session back and
+    /// forth, through a plain then an end-to-end encrypted target. A single
+    /// test, as both runs change CLAUDE_CONFIG_DIR.
     #[test]
     fn session_roundtrip_between_machines() {
+        roundtrip(None);
+        roundtrip(Some("correct horse battery"));
+    }
+
+    fn roundtrip(passphrase: Option<&str>) {
         let tmp = std::env::temp_dir().join(format!("cl-test-{}", uuid::Uuid::new_v4()));
         let shared = tmp.join("shared");
         let (home_a, home_b) = (tmp.join("claude-a"), tmp.join("claude-b"));
@@ -1117,7 +1230,13 @@ mod tests {
         )
         .unwrap();
         let (ma, mb) = (Machine { id: "A".into() }, Machine { id: "B".into() });
-        let (mut ra, mut rb) = (remote(&shared), remote(&shared));
+        let (mut ra, mut rb) = (
+            remote_with(&shared, passphrase),
+            remote_with(&shared, passphrase),
+        );
+        if passphrase.is_some() {
+            ra.set_encryption(true).unwrap();
+        }
         let index_a = SessionIndex::default();
         let report = syncer(&mut ra, &ma, "pc-a", &tmp.join("data-a"), &index_a).sync_all();
         assert_eq!(report.errors, Vec::<String>::new());
@@ -1203,6 +1322,21 @@ mod tests {
         assert!(sb.foreign_lock(id).unwrap().is_some());
         sa.release_lock(id).unwrap();
         assert!(sb.foreign_lock(id).unwrap().is_none());
+
+        if passphrase.is_some() {
+            // Sealed on disk, and a machine without the passphrase stops
+            // instead of reading or writing anything.
+            if std::env::var("CL_TEST_SYNC_TARGET").is_err() {
+                let raw = std::fs::read(shared.join(format!(
+                    "claude-legend/projects/local-app/sessions/{id}.jsonl"
+                )))
+                .unwrap();
+                assert!(crate::store::crypto::is_sealed(&raw));
+            }
+            let mut locked = remote(&shared);
+            let report = syncer(&mut locked, &ma, "pc-a", &tmp.join("data-a"), &index_a).sync_all();
+            assert!(report.errors[0].contains("chiffrées"), "{report:?}");
+        }
 
         std::env::remove_var("CLAUDE_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&tmp);

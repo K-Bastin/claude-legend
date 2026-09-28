@@ -4,7 +4,8 @@
 //
 // Runs the debug build (`cargo build` in src-tauri) against the Vite dev server,
 // in isolated settings, data and Claude folders filled with fake sessions and
-// quota, with a fake `claude` so no real session is shown, started or modified.
+// quota, with a fake `claude` so no real session is shown, started or modified
+// (it reports a finished answer through the hook relay two seconds in).
 // The virtual screen has the window size of tauri.conf.json (without a window
 // manager, the window cannot be resized). Each --js expression runs in the page,
 // in order, through the WebKit remote inspector, before the capture. Linux only;
@@ -66,13 +67,13 @@ function seedFakeData(home, claudeHome, dataDir) {
   const HOUR = 3_600_000;
   const now = Date.now();
   const sessions = [
-    ["Refonte de la synchronisation", "claude-legend", "develop", 0.1],
-    ["Écran partagé en 4 panneaux", "claude-legend", "feature/split", 3],
-    ["Corriger le calcul des adresses", "cohabsys", "main", 26],
-    ["Migration de la base de données", "cohabsys", "main", 50],
-    ["Tableau de bord des ventes", "tric-house", "develop", 80],
+    ["Refonte de la synchronisation", "claude-legend", "develop", 0.1, "J'ai remplacé le polling par un index distant mis en cache."],
+    ["Écran partagé en 4 panneaux", "claude-legend", "feature/split", 3, "La grille accepte maintenant jusqu'à quatre terminaux."],
+    ["Corriger le calcul des adresses", "cohabsys", "main", 26, "Le code postal était lu avant la commune : c'est corrigé."],
+    ["Migration de la base de données", "cohabsys", "main", 50, "La migration ajoute un index sur la table des logements."],
+    ["Tableau de bord des ventes", "tric-house", "develop", 80, "Les ventes sont regroupées par semaine et par magasin."],
   ];
-  sessions.forEach(([title, project, gitBranch, hoursAgo], i) => {
+  sessions.forEach(([title, project, gitBranch, hoursAgo, answer], i) => {
     const cwd = join(home, "dev", project);
     mkdirSync(cwd, { recursive: true });
     // Claude Code's folder name for a project: every non-alphanumeric character becomes "-".
@@ -81,12 +82,26 @@ function seedFakeData(home, claudeHome, dataDir) {
     const file = join(dir, `00000000-0000-4000-8000-00000000000${i}.jsonl`);
     const lines = [
       { type: "user", cwd, gitBranch, message: { role: "user", content: title } },
+      { type: "assistant", cwd, message: { role: "assistant", content: [{ type: "text", text: answer }] } },
       { type: "ai-title", aiTitle: title },
     ];
     writeFileSync(file, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
     const mtime = new Date(now - hoursAgo * HOUR);
     utimesSync(file, mtime, mtime);
   });
+
+  // A version of the first conversation set aside by a sync conflict, in the
+  // machine-independent form the sync keeps.
+  const conflicts = join(dataDir, "conflicts");
+  mkdirSync(conflicts, { recursive: true });
+  const root = "{{claude-legend:root}}";
+  writeFileSync(
+    join(conflicts, `00000000-0000-4000-8000-000000000000-${now - 2 * HOUR}-distant.jsonl`),
+    [
+      { type: "user", cwd: root, sessionId: "00000000-0000-4000-8000-000000000000", message: { role: "user", content: "Refonte de la synchronisation" } },
+      { type: "user", cwd: root, sessionId: "00000000-0000-4000-8000-000000000000", message: { role: "user", content: "Suite écrite sur l'autre PC" } },
+    ].map((l) => JSON.stringify(l)).join("\n") + "\n",
+  );
 
   const inSeconds = (ms) => Math.round((now + ms) / 1000);
   mkdirSync(dataDir, { recursive: true });
@@ -134,7 +149,15 @@ try {
   const fakeClaude = join(home, "fake-claude.sh");
   writeFileSync(
     fakeClaude,
-    `#!/bin/bash\nprintf '\\033[1mFake Claude\\033[0m (capture)\\n'\nwhile true; do read -r -t 1 _; done\n`,
+    [
+      "#!/bin/bash",
+      "printf '\\033[1mFake Claude\\033[0m (capture)\\n'",
+      // Like Claude Code finishing an answer: the Stop hook, through the app's relay.
+      'id=; prev=; for a in "$@"; do case "$prev" in --resume|--session-id) id="$a";; esac; prev="$a"; done',
+      `(sleep 2; printf '{"session_id":"%s","hook_event_name":"Stop"}' "$id" | "${APP}" --hook-relay) &`,
+      "while true; do read -r -t 1 _; done",
+      "",
+    ].join("\n"),
   );
   chmodSync(fakeClaude, 0o755);
   writeFileSync(

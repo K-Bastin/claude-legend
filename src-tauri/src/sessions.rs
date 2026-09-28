@@ -36,7 +36,7 @@ pub struct ProjectIdentity {
     pub git_remote: Option<String>,
 }
 
-fn user_text(entry: &Value) -> Option<String> {
+pub(crate) fn user_text(entry: &Value) -> Option<String> {
     if entry.get("isMeta").and_then(Value::as_bool) == Some(true)
         || entry.get("isSidechain").and_then(Value::as_bool) == Some(true)
     {
