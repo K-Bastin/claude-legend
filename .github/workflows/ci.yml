@@ -24,19 +24,20 @@ jobs:
           if [ "$BASE" = "main" ]; then
             [[ "$HEAD" =~ ^(release|hotfix)/ ]] || { echo "::error::main n'accepte que des branches release/* ou hotfix/* (reçu : $HEAD)."; exit 1; }
           else
-            [[ "$HEAD" =~ ^(feature|fix|chore|docs|refactor|test|ci|perf|hotfix)/[a-z0-9._-]+$ || "$HEAD" = "main" ]] \
+            [[ "$HEAD" =~ ^(feature|fix|chore|docs|refactor|test|ci|perf|hotfix)/[a-z0-9._-]+$ || "$HEAD" =~ ^dependabot/ || "$HEAD" = "main" ]] \
               || { echo "::error::Nom de branche invalide : $HEAD (attendu : feature/…, fix/…, chore/…, docs/…, refactor/…)."; exit 1; }
           fi
 
   commits:
     name: Conventional commits
-    if: github.event_name == 'pull_request'
+    # Dependabot writes conventional titles but long bodies (changelog links).
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: lts/*
           cache: npm
@@ -52,14 +53,31 @@ jobs:
     name: Frontend
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: lts/*
           cache: npm
       - run: npm ci
       - run: npm run typecheck
       - run: npx vite build
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: lts/*
+      - name: npm packages shipped in the app
+        run: npm audit --omit=dev --audit-level=high
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-audit
+      - name: Rust crates (RustSec advisories)
+        working-directory: src-tauri
+        run: cargo audit
 
   rust:
     name: Rust (${{ matrix.os }})
@@ -69,11 +87,12 @@ jobs:
         os: [ubuntu-22.04, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
+          toolchain: stable
           components: rustfmt, clippy
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: src-tauri
       - name: Linux dependencies

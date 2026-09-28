@@ -36,7 +36,7 @@ pub struct ProjectIdentity {
     pub git_remote: Option<String>,
 }
 
-fn user_text(entry: &Value) -> Option<String> {
+pub(crate) fn user_text(entry: &Value) -> Option<String> {
     if entry.get("isMeta").and_then(Value::as_bool) == Some(true)
         || entry.get("isSidechain").and_then(Value::as_bool) == Some(true)
     {
@@ -212,6 +212,38 @@ pub fn normalize_remote(url: &str) -> String {
     s.trim_end_matches('/').trim_end_matches(".git").to_string()
 }
 
+/// Session ids are the UUIDs Claude Code names its transcripts with. Ids read
+/// from the sync target end up in file names and `claude` arguments, so
+/// anything else is refused.
+pub fn is_session_id(id: &str) -> bool {
+    uuid::Uuid::try_parse(id).is_ok_and(|u| u.hyphenated().to_string() == id.to_lowercase())
+}
+
+/// Project keys are slugs (see [`slug`]), safe as file and directory names.
+pub fn is_project_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 200
+        && key
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// The remote URL without credentials (`https://user:token@host/…`).
+fn redact_remote(url: &str) -> String {
+    match url.find("://") {
+        Some(scheme_end) => {
+            let rest = &url[scheme_end + 3..];
+            let host_start = rest
+                .find('/')
+                .map_or(rest, |i| &rest[..i])
+                .rfind('@')
+                .map_or(0, |i| i + 1);
+            format!("{}{}", &url[..scheme_end + 3], &rest[host_start..])
+        }
+        None => url.to_string(),
+    }
+}
+
 pub fn slug(s: &str) -> String {
     let mut out = String::new();
     for c in s.to_lowercase().chars() {
@@ -256,7 +288,7 @@ fn compute_identity(cwd: &str) -> ProjectIdentity {
         return ProjectIdentity {
             key: slug(&key),
             name,
-            git_remote: Some(remote),
+            git_remote: Some(redact_remote(&remote)),
         };
     }
     ProjectIdentity {
@@ -281,6 +313,40 @@ mod tests {
         let b = slug(&normalize_remote("https://github.com/kb/cohabsys"));
         assert_eq!(a, b);
         assert_eq!(a, "github-com-kb-cohabsys");
+    }
+
+    #[test]
+    fn only_uuids_and_slugs_are_accepted() {
+        assert!(is_session_id("11111111-2222-3333-4444-555555555555"));
+        for bad in [
+            "--dangerously-skip-permissions",
+            "../x",
+            "",
+            "11111111222233334444555555555555",
+        ] {
+            assert!(!is_session_id(bad), "{bad}");
+        }
+        assert!(is_project_key("github-com-kb-app"));
+        for bad in ["", "../x", "a/b", "A", r"a\b", "a.b"] {
+            assert!(!is_project_key(bad), "{bad}");
+        }
+        assert!(is_project_key(&compute_identity("/").key));
+    }
+
+    #[test]
+    fn remote_credentials_are_not_kept() {
+        assert_eq!(
+            redact_remote("https://kb:ghp_secret@github.com/kb/app.git"),
+            "https://github.com/kb/app.git"
+        );
+        assert_eq!(
+            redact_remote("ssh://git@host:22/a@b.git"),
+            "ssh://host:22/a@b.git"
+        );
+        assert_eq!(
+            redact_remote("git@github.com:kb/app.git"),
+            "git@github.com:kb/app.git"
+        );
     }
 
     #[test]

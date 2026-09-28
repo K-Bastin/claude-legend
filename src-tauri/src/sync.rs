@@ -11,6 +11,7 @@
 //! projects/<key>/memory/…
 //! file-history/<id>/…                          checkpoints used by /rewind
 //! locks/<id>.json
+//! archive/<id>.json                            archived or restored, see crate::archive
 //! ```
 //! Each file is only ever written by one machine at a time, except
 //! sessions and memory, which are reconciled with a three-way comparison
@@ -20,9 +21,10 @@
 //! a network hiccup can never make a remote session look missing and get
 //! overwritten.
 
+use crate::archive;
 use crate::config::{load_json, save_json, Machine};
 use crate::paths::{self, localize, neutralize, write_atomic};
-use crate::sessions::{LocalSession, ProjectIdentity, SessionIndex};
+use crate::sessions::{is_project_key, is_session_id, LocalSession, ProjectIdentity, SessionIndex};
 use crate::store::{join, Entry, Remote};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -144,6 +146,8 @@ pub struct Syncer<'a> {
     pub conflicts_dir: PathBuf,
     /// Local copies of the project rules.
     pub rules_dir: PathBuf,
+    /// Local archive markers, see [`crate::archive`].
+    pub archive_dir: PathBuf,
     pub index: &'a SessionIndex,
     /// Sessions currently running here: never overwritten from the remote.
     pub open_sessions: HashSet<String>,
@@ -199,10 +203,12 @@ fn rel_path(file: &Path, base: &Path) -> Option<String> {
     )
 }
 
-fn local_path(base: &Path, rel: &str) -> PathBuf {
-    rel.split('/')
-        .filter(|s| !s.is_empty())
-        .fold(base.to_path_buf(), |p, s| p.join(s))
+fn archived_ids(markers: &HashMap<String, archive::Marker>) -> HashSet<String> {
+    markers
+        .iter()
+        .filter(|(_, m)| m.archived)
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 fn project_dir(key: &str) -> String {
@@ -261,18 +267,28 @@ impl<'a> Syncer<'a> {
         )
     }
 
+    /// Keys and ids read from the store become local file names and `claude`
+    /// arguments: projects whose key is not a slug matching their folder, and
+    /// sessions whose id is not a UUID matching their file, are ignored.
     pub fn build_index(&self) -> anyhow::Result<RemoteIndex> {
         let mapping_name = format!("{}.json", self.machine.id);
         let mut projects = Vec::new();
         let mut unreadable = HashSet::new();
-        for dir in self.list("projects")?.into_iter().filter(|e| e.is_dir) {
+        for dir in self
+            .list("projects")?
+            .into_iter()
+            .filter(|e| e.is_dir && is_project_key(&e.name))
+        {
             let base = project_dir(&dir.name);
             // Listing first lets unchanged files come from the cache.
             let has_rules = self
                 .list(&base)?
                 .iter()
                 .any(|e| !e.is_dir && e.name == "rules.md");
-            let Some(info) = self.read_json::<ProjectInfo>(&join(&base, "project.json"))? else {
+            let Some(info) = self
+                .read_json::<ProjectInfo>(&join(&base, "project.json"))?
+                .filter(|info| info.key == dir.name)
+            else {
                 continue;
             };
             let mapping = if self
@@ -287,11 +303,16 @@ impl<'a> Syncer<'a> {
             };
             let mut sessions = Vec::new();
             for entry in self.list(&join(&base, "sessions"))? {
-                let Some(id) = entry.name.strip_suffix(".meta.json") else {
+                let Some(id) = entry
+                    .name
+                    .strip_suffix(".meta.json")
+                    .filter(|id| is_session_id(id))
+                else {
                     continue;
                 };
-                match self.read_json(&format!("{base}/sessions/{}", entry.name))? {
-                    Some(meta) => sessions.push(meta),
+                match self.read_json::<RemoteMeta>(&format!("{base}/sessions/{}", entry.name))? {
+                    Some(meta) if meta.id == id => sessions.push(meta),
+                    Some(_) => {}
                     None => {
                         unreadable.insert(id.to_string());
                     }
@@ -307,7 +328,10 @@ impl<'a> Syncer<'a> {
         let mut locks = Vec::new();
         for entry in self.list("locks")? {
             if entry.name.ends_with(".json") {
-                if let Some(lock) = self.read_json(&format!("locks/{}", entry.name))? {
+                if let Some(lock) = self
+                    .read_json::<LockInfo>(&format!("locks/{}", entry.name))?
+                    .filter(|l| is_session_id(&l.session_id))
+                {
                     locks.push(lock);
                 }
             }
@@ -403,6 +427,7 @@ impl<'a> Syncer<'a> {
         };
         let mut state = self.load_state();
 
+        let archived = self.sync_archive(&mut report);
         let locals = self.index.scan();
         let local_ids: HashSet<String> = locals.iter().map(|s| s.id.clone()).collect();
         let mut keys = HashSet::new();
@@ -422,7 +447,8 @@ impl<'a> Syncer<'a> {
             };
             keys.insert(project.info.key.clone());
             for meta in &project.sessions {
-                if local_ids.contains(&meta.id) {
+                // Archived conversations are only fetched once restored.
+                if local_ids.contains(&meta.id) || archived.contains(&meta.id) {
                     continue;
                 }
                 match self.pull(&project.info.key, meta, local_root) {
@@ -733,7 +759,9 @@ impl<'a> Syncer<'a> {
         to_remote: &dyn Fn(&str) -> String,
     ) -> anyhow::Result<()> {
         for (rel, entry) in self.walk(remote_dir)? {
-            let target = local_path(local_dir, &rel);
+            let Some(target) = paths::safe_join(local_dir, &rel) else {
+                anyhow::bail!("chemin distant refusé : {rel}");
+            };
             let text = paths::is_text_file(&target);
             let local_size = if text {
                 std::fs::read_to_string(&target)
@@ -791,8 +819,14 @@ impl<'a> Syncer<'a> {
         );
 
         for rel in rels {
+            let Some(local) = paths::safe_join(&local_dir, &rel) else {
+                report
+                    .errors
+                    .push(format!("Mémoire de {key} : chemin distant refusé : {rel}"));
+                continue;
+            };
             let changed = self.reconcile_file(
-                &local_path(&local_dir, &rel),
+                &local,
                 &join(&remote_dir, &rel),
                 remote_files.get(&rel),
                 format!("m:{key}/{rel}"),
@@ -863,6 +897,59 @@ impl<'a> Syncer<'a> {
         Ok(Some(push))
     }
 
+    // ---------- archive ----------
+
+    /// Reconciles archive markers, the most recent winning on both sides.
+    /// Returns the ids archived once reconciled.
+    fn sync_archive(&self, report: &mut SyncReport) -> HashSet<String> {
+        let mut markers = archive::load_all(&self.archive_dir);
+        let remote = match self.list("archive") {
+            Ok(entries) => entries,
+            Err(e) => {
+                report.errors.push(format!("Archives : {e:#}"));
+                return archived_ids(&markers);
+            }
+        };
+        let remote_ids: HashSet<String> = remote
+            .iter()
+            .filter_map(|e| e.name.strip_suffix(".json"))
+            .filter(|id| is_session_id(id))
+            .map(str::to_string)
+            .collect();
+        let ids: HashSet<String> = markers
+            .keys()
+            .cloned()
+            .chain(remote_ids.iter().cloned())
+            .collect();
+        for id in ids {
+            let path = format!("archive/{id}.json");
+            let result = (|| -> anyhow::Result<()> {
+                let remote_marker = if remote_ids.contains(&id) {
+                    self.read_json::<archive::Marker>(&path)?
+                } else {
+                    None
+                };
+                match archive::newest(markers.get(&id).copied(), remote_marker) {
+                    Some((marker, true)) => {
+                        self.write_json(&path, &marker)?;
+                        report.pushed += 1;
+                    }
+                    Some((marker, false)) => {
+                        archive::save(&self.archive_dir, &id, &marker)?;
+                        markers.insert(id.clone(), marker);
+                        report.pulled += 1;
+                    }
+                    None => {}
+                }
+                Ok(())
+            })();
+            if let Err(e) = result {
+                report.errors.push(format!("Archives : {e:#}"));
+            }
+        }
+        archived_ids(&markers)
+    }
+
     // ---------- rules ----------
 
     /// Syncs project rules for every project known to the store. Rules of a
@@ -920,6 +1007,10 @@ mod tests {
     /// `SyncTarget` as JSON (password in `CL_TEST_SECRET`); a unique
     /// sub-directory keeps runs apart.
     fn remote(shared: &Path) -> Remote {
+        remote_with(shared, None)
+    }
+
+    fn remote_with(shared: &Path, passphrase: Option<&str>) -> Remote {
         use crate::config::SyncTarget;
         let run = shared
             .parent()
@@ -970,7 +1061,11 @@ mod tests {
                 path: shared.to_string_lossy().into_owned(),
             },
         };
-        Remote::new(target, std::env::var("CL_TEST_SECRET").ok())
+        Remote::new(
+            target,
+            std::env::var("CL_TEST_SECRET").ok(),
+            passphrase.map(str::to_string),
+        )
     }
 
     fn syncer<'a>(
@@ -988,6 +1083,7 @@ mod tests {
             state_path: data.join("state.json"),
             conflicts_dir: data.join("conflicts"),
             rules_dir: data.join("rules"),
+            archive_dir: data.join("archive"),
             index,
             open_sessions: HashSet::new(),
             fresh_index: RefCell::new(None),
@@ -1007,9 +1103,100 @@ mod tests {
         )
     }
 
-    /// Two machines with different project paths hand a session back and forth.
+    /// Archiving and restoring spread between machines, the latest winning.
+    #[test]
+    fn archive_markers_follow_the_latest_change() {
+        let tmp = std::env::temp_dir().join(format!("cl-test-{}", uuid::Uuid::new_v4()));
+        let id = "11111111-2222-3333-4444-555555555555";
+        let (ma, mb) = (Machine { id: "A".into() }, Machine { id: "B".into() });
+        let (mut ra, mut rb) = (remote(&tmp.join("shared")), remote(&tmp.join("shared")));
+        let index = SessionIndex::default();
+        let (dir_a, dir_b) = (tmp.join("data-a/archive"), tmp.join("data-b/archive"));
+
+        archive::set(&dir_a, id, true).unwrap();
+        let archived = syncer(&mut ra, &ma, "a", &tmp.join("data-a"), &index)
+            .sync_archive(&mut SyncReport::default());
+        assert!(archived.contains(id));
+        let archived = syncer(&mut rb, &mb, "b", &tmp.join("data-b"), &index)
+            .sync_archive(&mut SyncReport::default());
+        assert!(archived.contains(id));
+        assert!(archive::load_all(&dir_b)[id].archived);
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        archive::set(&dir_b, id, false).unwrap();
+        syncer(&mut rb, &mb, "b", &tmp.join("data-b"), &index)
+            .sync_archive(&mut SyncReport::default());
+        let archived = syncer(&mut ra, &ma, "a", &tmp.join("data-a"), &index)
+            .sync_archive(&mut SyncReport::default());
+        assert!(archived.is_empty());
+        assert!(!archive::load_all(&dir_a)[id].archived);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Keys and ids from a tampered store never reach local paths.
+    #[test]
+    fn tampered_store_entries_are_ignored() {
+        let tmp = std::env::temp_dir().join(format!("cl-test-{}", uuid::Uuid::new_v4()));
+        let root = tmp.join("shared").join("claude-legend");
+        let good = "11111111-2222-3333-4444-555555555555";
+        let write = |rel: &str, value: serde_json::Value| {
+            let file = paths::safe_join(&root, rel).unwrap();
+            crate::paths::write_atomic(&file, value.to_string().as_bytes()).unwrap();
+        };
+        let meta = |id: &str| {
+            serde_json::json!({"id": id, "projectKey": "app", "title": "t", "firstPrompt": "p",
+                "gitBranch": null, "promptCount": 1, "updatedAt": 1, "hash": "h",
+                "machineId": "X", "machineName": "x"})
+        };
+        write(
+            "projects/app/project.json",
+            serde_json::json!({"key": "app", "name": "app"}),
+        );
+        write(
+            &format!("projects/app/sessions/{good}.meta.json"),
+            meta(good),
+        );
+        write("projects/app/sessions/--resume.meta.json", meta("--resume"));
+        write(
+            "projects/app/sessions/22222222-2222-3333-4444-555555555555.meta.json",
+            meta("../../../../.bashrc"),
+        );
+        write(
+            "projects/evil/project.json",
+            serde_json::json!({"key": "../../../../.claude/CLAUDE", "name": "evil"}),
+        );
+        write(
+            "locks/x.json",
+            serde_json::json!({"sessionId": "../x", "machineId": "X", "machineName": "x", "since": 1, "heartbeat": 1}),
+        );
+
+        let mut remote = remote(&tmp.join("shared"));
+        let machine = Machine { id: "A".into() };
+        let index = SessionIndex::default();
+        let s = syncer(&mut remote, &machine, "pc-a", &tmp.join("data"), &index);
+        let built = s.build_index().unwrap();
+        assert_eq!(built.projects.len(), 1);
+        assert_eq!(built.projects[0].info.key, "app");
+        let ids: Vec<_> = built.projects[0]
+            .sessions
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(ids, [good]);
+        assert!(built.locks.is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Two machines with different project paths hand a session back and
+    /// forth, through a plain then an end-to-end encrypted target. A single
+    /// test, as both runs change CLAUDE_CONFIG_DIR.
     #[test]
     fn session_roundtrip_between_machines() {
+        roundtrip(None);
+        roundtrip(Some("correct horse battery"));
+    }
+
+    fn roundtrip(passphrase: Option<&str>) {
         let tmp = std::env::temp_dir().join(format!("cl-test-{}", uuid::Uuid::new_v4()));
         let shared = tmp.join("shared");
         let (home_a, home_b) = (tmp.join("claude-a"), tmp.join("claude-b"));
@@ -1043,7 +1230,13 @@ mod tests {
         )
         .unwrap();
         let (ma, mb) = (Machine { id: "A".into() }, Machine { id: "B".into() });
-        let (mut ra, mut rb) = (remote(&shared), remote(&shared));
+        let (mut ra, mut rb) = (
+            remote_with(&shared, passphrase),
+            remote_with(&shared, passphrase),
+        );
+        if passphrase.is_some() {
+            ra.set_encryption(true).unwrap();
+        }
         let index_a = SessionIndex::default();
         let report = syncer(&mut ra, &ma, "pc-a", &tmp.join("data-a"), &index_a).sync_all();
         assert_eq!(report.errors, Vec::<String>::new());
@@ -1129,6 +1322,21 @@ mod tests {
         assert!(sb.foreign_lock(id).unwrap().is_some());
         sa.release_lock(id).unwrap();
         assert!(sb.foreign_lock(id).unwrap().is_none());
+
+        if passphrase.is_some() {
+            // Sealed on disk, and a machine without the passphrase stops
+            // instead of reading or writing anything.
+            if std::env::var("CL_TEST_SYNC_TARGET").is_err() {
+                let raw = std::fs::read(shared.join(format!(
+                    "claude-legend/projects/local-app/sessions/{id}.jsonl"
+                )))
+                .unwrap();
+                assert!(crate::store::crypto::is_sealed(&raw));
+            }
+            let mut locked = remote(&shared);
+            let report = syncer(&mut locked, &ma, "pc-a", &tmp.join("data-a"), &index_a).sync_all();
+            assert!(report.errors[0].contains("chiffrées"), "{report:?}");
+        }
 
         std::env::remove_var("CLAUDE_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&tmp);

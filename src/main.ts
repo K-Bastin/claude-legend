@@ -12,9 +12,10 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { icon } from "./icons";
+import { notificationsEnabled, notify, notifyOnce, setNotificationsEnabled } from "./notifications";
 import { applyTheme, loadThemeMode, onSystemThemeChange, saveThemeMode, TERMINAL_THEMES, type ThemeMode } from "./theme";
 import { autoCheckEnabled, checkAtStartup, checkNow, setAutoCheck, updateSupport, type InstallHooks } from "./updates";
-import { fillSyncForm, missingSyncField, readSyncForm, updateSyncVisibility, type SyncTarget } from "./sync-form";
+import { fillSyncForm, missingSyncField, readSyncForm, transportWarning, updateSyncVisibility, type SyncTarget } from "./sync-form";
 
 // ---------- types ----------
 
@@ -50,6 +51,16 @@ interface SessionEntry {
   lastMachine: string | null;
   lockedBy: LockInfo | null;
   openHere: boolean;
+  archived: boolean;
+}
+
+interface Conflict {
+  file: string;
+  sessionId: string;
+  title: string;
+  savedAt: number;
+  side: "local" | "distant";
+  promptCount: number;
 }
 
 interface SyncReport {
@@ -70,6 +81,14 @@ interface AppInfo {
   home: string;
 }
 
+/** Left by Claude Code's hooks, see events.rs. */
+interface ClaudeEvent {
+  sessionId: string;
+  kind: "notification" | "stop";
+  message: string | null;
+  at: number;
+}
+
 type PtyEvent = { kind: "data"; data: string } | { kind: "exit"; code: number | null };
 
 interface Tab {
@@ -84,6 +103,7 @@ interface Tab {
   tabEl: HTMLDivElement;
   exited: boolean;
   activity: boolean;
+  resize: ResizeObserver;
 }
 
 // ---------- state ----------
@@ -105,6 +125,13 @@ let quota: { rateLimits: { five_hour?: RateLimit; seven_day?: RateLimit }; updat
 /** Projects that have rules, see openRules. */
 let rulesKeys = new Set<string>();
 let lastReport: SyncReport | null = null;
+/** Versions set aside by sync conflicts, see openConflicts. */
+let conflicts: Conflict[] = [];
+/** Conversations whose messages match the search, with an excerpt, see searchContent. */
+let contentHits = new Map<string, string>();
+let searchTimer: ReturnType<typeof setTimeout> | undefined;
+/** The list shows archived conversations instead of the others. */
+let showArchived = false;
 let syncing = false;
 const tabs: Tab[] = [];
 let activeTab: Tab | null = null;
@@ -120,6 +147,11 @@ let activePane = 0;
 let shuttingDown = false;
 /** SFTP host key approved in the settings dialog, see readSyncForm. */
 let approvedFingerprint: string | null = null;
+
+interface EncryptionStatus {
+  enabled: boolean;
+  unlocked: boolean;
+}
 
 interface TestOutcome {
   ok: boolean;
@@ -212,22 +244,39 @@ async function refreshSessions() {
   try {
     sessions = await invoke<SessionEntry[]>("list_sessions");
     rulesKeys = new Set(await invoke<string[]>("rules_keys"));
+    conflicts = await invoke<Conflict[]>("list_conflicts");
   } catch (e) {
     toast(`Lecture des sessions impossible : ${e}`, "error");
   }
   renderSessions();
+  renderStatus();
 }
 
 function renderSessions() {
   const list = $("#session-list");
   const query = $<HTMLInputElement>("#search").value.trim().toLowerCase();
+  const archivedCount = sessions.filter((s) => s.archived).length;
+  if (!archivedCount) showArchived = false;
   const visible = sessions.filter(
-    (s) => !query || `${s.title} ${s.firstPrompt} ${s.projectName} ${s.gitBranch ?? ""}`.toLowerCase().includes(query),
+    (s) =>
+      s.archived === showArchived &&
+      (!query ||
+        `${s.title} ${s.firstPrompt} ${s.projectName} ${s.gitBranch ?? ""}`.toLowerCase().includes(query) ||
+        contentHits.has(s.id)),
   );
+  const toggle = archivedCount
+    ? el("button", {
+        className: "archive-toggle",
+        textContent: showArchived ? "← Conversations" : `Archives (${archivedCount})`,
+        onclick: () => {
+          showArchived = !showArchived;
+          renderSessions();
+        },
+      })
+    : null;
   if (!visible.length) {
-    list.replaceChildren(
-      el("div", { className: "empty-list", textContent: query ? "Aucun résultat." : "Aucune conversation pour l'instant." }),
-    );
+    const empty = query ? "Aucun résultat." : showArchived ? "Aucune conversation archivée." : "Aucune conversation pour l'instant.";
+    list.replaceChildren(el("div", { className: "empty-list", textContent: empty }), ...(toggle ? [toggle] : []));
     return;
   }
 
@@ -277,14 +326,26 @@ function renderSessions() {
       const meta = [relativeTime(s.updatedAt), s.gitBranch, s.lastMachine && s.location === "remote" ? s.lastMachine : null]
         .filter(Boolean)
         .join(" · ");
+      // A span: the session item is itself a button.
+      const archiveBtn = el("span", {
+        className: "session-action",
+        role: "button",
+        title: s.archived ? "Restaurer la conversation" : "Archiver la conversation (masquée sur tous les PC, rien n'est supprimé)",
+        innerHTML: icon(s.archived ? "restore" : "archive"),
+      });
+      archiveBtn.onclick = (e) => {
+        e.stopPropagation();
+        setArchived(s, !s.archived);
+      };
       const item = el(
         "button",
         {
           className: `session ${s.location}${s.id === activeSession ? " active" : ""}`,
           title: s.firstPrompt,
         },
-        el("div", { className: "title" }, el("span", { className: "t", textContent: s.title }), ...badges),
+        el("div", { className: "title" }, el("span", { className: "t", textContent: s.title }), ...badges, archiveBtn),
         el("div", { className: "meta", textContent: meta }),
+        query && contentHits.has(s.id) ? el("div", { className: "snippet", textContent: contentHits.get(s.id)! }) : null,
       );
       item.onclick = () => resumeSession(s);
       makeDraggable(item, () => s.title, (pane) => {
@@ -297,7 +358,44 @@ function renderSessions() {
     });
     nodes.push(el("div", { className: "project" }, header, ...items));
   }
+  if (toggle) nodes.push(toggle);
   list.replaceChildren(...nodes);
+}
+
+/** Filters titles right away, then searches the messages once typing pauses. */
+function onSearchInput() {
+  const query = $<HTMLInputElement>("#search").value.trim();
+  clearTimeout(searchTimer);
+  if (query.length < 3) {
+    contentHits = new Map();
+    renderSessions();
+    return;
+  }
+  renderSessions();
+  searchTimer = setTimeout(() => searchContent(query), 250);
+}
+
+async function searchContent(query: string) {
+  try {
+    const hits = await invoke<{ id: string; snippet: string }[]>("search_sessions", { query });
+    // Typing went on while searching.
+    if ($<HTMLInputElement>("#search").value.trim() !== query) return;
+    contentHits = new Map(hits.map((h) => [h.id, h.snippet]));
+    renderSessions();
+  } catch (e) {
+    toast(`Recherche impossible : ${e}`, "error");
+  }
+}
+
+async function setArchived(s: SessionEntry, archived: boolean) {
+  try {
+    await invoke("set_archived", { sessionId: s.id, archived });
+    s.archived = archived;
+    renderSessions();
+    toast(archived ? `« ${s.title} » archivée. Retrouve-la dans les archives en bas de la liste.` : `« ${s.title} » restaurée.`);
+  } catch (e) {
+    toast(`${e}`, "error");
+  }
 }
 
 function renderStatus() {
@@ -319,13 +417,85 @@ function renderStatus() {
         className: "err",
         textContent: `${lastReport.errors.length + lastReport.conflicts.length} alerte(s) — détails`,
       });
-      errs.onclick = () => toast([...lastReport!.conflicts, ...lastReport!.errors].join("\n"), "warn", 15000);
+      errs.onclick = openConflicts;
       lines.push(errs);
     }
+  }
+  if (conflicts.length) {
+    const link = el("div", {
+      className: "err",
+      textContent: `${conflicts.length} version(s) mise(s) de côté — voir`,
+      title: "Versions de conversations modifiées sur deux PC à la fois",
+    });
+    link.onclick = openConflicts;
+    lines.push(link);
   }
   lines.push(...quotaRows());
   lines.push(el("div", { textContent: info.syncEnabled ? `${settings.machineName} · ${info.syncLabel}` : settings.machineName }));
   status.replaceChildren(...lines);
+}
+
+// ---------- sync alerts ----------
+
+function openConflicts() {
+  renderConflicts();
+  const dialog = $<HTMLDialogElement>("#conflicts-dialog");
+  if (!dialog.open) dialog.showModal();
+}
+
+function renderConflicts() {
+  const messages = lastReport ? [...lastReport.errors, ...lastReport.conflicts] : [];
+  $("#sync-errors").hidden = !messages.length;
+  $("#sync-error-list").replaceChildren(...messages.map((m) => el("li", { textContent: m })));
+  $("#conflict-section").hidden = !conflicts.length && !!messages.length;
+  $("#conflict-list").replaceChildren(
+    ...(conflicts.length
+      ? conflicts.map((c) => {
+          const restore = el("button", { type: "button", textContent: "Restaurer comme nouvelle conversation" });
+          restore.onclick = () => restoreConflict(c);
+          const remove = el("button", { type: "button", textContent: "Supprimer" });
+          remove.onclick = () => deleteConflict(c);
+          const when = new Date(c.savedAt).toLocaleString("fr-FR", { dateStyle: "medium", timeStyle: "short" });
+          return el(
+            "li",
+            { className: "conflict" },
+            el("div", { className: "conflict-title", textContent: c.title }),
+            el("div", {
+              className: "meta",
+              textContent: `Version ${c.side === "local" ? "de ce PC" : "d'un autre PC"}, mise de côté le ${when} · ${c.promptCount} message(s)`,
+            }),
+            el("div", { className: "row" }, restore, remove),
+          );
+        })
+      : [el("li", { className: "meta", textContent: "Aucune version mise de côté." })]),
+  );
+}
+
+async function restoreConflict(c: Conflict) {
+  try {
+    await invoke<string>("restore_conflict", { file: c.file });
+    toast(`Version de « ${c.title} » restaurée comme nouvelle conversation.`);
+    await refreshSessions();
+    renderConflicts();
+  } catch (e) {
+    toast(`Restauration impossible : ${e}`, "error", 10000);
+  }
+}
+
+async function deleteConflict(c: Conflict) {
+  const choice = await ask(`Supprimer définitivement cette version de « ${c.title} » ?`, [
+    { label: "Annuler", value: "cancel" },
+    { label: "Supprimer", value: "delete", primary: true },
+  ]);
+  if (choice === "delete") {
+    try {
+      await invoke("delete_conflict", { file: c.file });
+      await refreshSessions();
+    } catch (e) {
+      toast(`${e}`, "error");
+    }
+  }
+  openConflicts();
 }
 
 // ---------- quota ----------
@@ -333,6 +503,33 @@ function renderStatus() {
 async function refreshQuota() {
   quota = await invoke<typeof quota>("get_quota").catch(() => null);
   renderStatus();
+  const limits = quota?.rateLimits;
+  for (const [label, limit] of [
+    ["Session 5 h", limits?.five_hour],
+    ["Semaine", limits?.seven_day],
+  ] as const) {
+    if (!limit || limit.used_percentage < 90) continue;
+    if (limit.resets_at && limit.resets_at * 1000 <= Date.now()) continue;
+    notifyOnce(
+      `${label}:${limit.resets_at ?? ""}`,
+      "Quota Claude presque atteint",
+      `${label} : ${Math.round(limit.used_percentage)} % utilisé` + (limit.resets_at ? `, réinitialisation ${formatReset(limit.resets_at)}` : ""),
+    );
+  }
+}
+
+/** Claude waits or finished in a conversation: flag its tab, and notify when it is out of view. */
+function onClaudeEvent(event: ClaudeEvent) {
+  const tab = tabs.find((t) => t.sessionId === event.sessionId);
+  if (!tab) return;
+  const shown = panes.includes(tab);
+  if (shown && document.hasFocus()) return;
+  if (!shown && !tab.activity) {
+    tab.activity = true;
+    renderTab(tab);
+  }
+  const waiting = event.kind === "notification";
+  notify(waiting ? "Claude attend ta réponse" : "Claude a terminé", waiting && event.message ? `${tab.title}\n${event.message}` : tab.title);
 }
 
 function formatReset(seconds: number): string {
@@ -440,6 +637,11 @@ function createTab(title: string, cwd: string, sessionId: string | null): Tab {
   term.open(container);
 
   const tabEl = el("div", { className: "tab" });
+  const resize = new ResizeObserver(() => {
+    // Terminals parked in the hidden holder have no size to fit to.
+    if (container.offsetParent !== null) fit.fit();
+  });
+  resize.observe(container);
   const tab: Tab = {
     key: ++tabSeq,
     ptyId: null,
@@ -452,6 +654,7 @@ function createTab(title: string, cwd: string, sessionId: string | null): Tab {
     tabEl,
     exited: false,
     activity: false,
+    resize,
   };
   tabEl.onclick = () => activateTab(tab);
   tabEl.onauxclick = (e) => e.button === 1 && closeTab(tab);
@@ -477,11 +680,6 @@ function createTab(title: string, cwd: string, sessionId: string | null): Tab {
       renderTab(tab);
     }
   });
-  new ResizeObserver(() => {
-    // Terminals parked in the hidden holder have no size to fit to.
-    if (container.offsetParent !== null) fit.fit();
-  }).observe(container);
-
   tabs.push(tab);
   activateTab(tab);
   return tab;
@@ -516,6 +714,7 @@ function activateTab(tab: Tab) {
 
 function closeTab(tab: Tab) {
   if (tab.ptyId !== null && !tab.exited) invoke("pty_kill", { id: tab.ptyId });
+  tab.resize.disconnect();
   tab.term.dispose();
   tab.el.remove();
   tab.tabEl.remove();
@@ -680,6 +879,8 @@ function makeDraggable(handle: HTMLElement, label: () => string, onDrop: (pane: 
 async function launch(tab: Tab, sessionId: string | null): Promise<boolean> {
   const channel = new Channel<PtyEvent>();
   channel.onmessage = (event) => {
+    // Output still in flight when the tab was closed.
+    if (!tabs.includes(tab)) return;
     if (event.kind === "data") {
       tab.term.write(event.data);
       if (!panes.includes(tab) && !tab.activity) {
@@ -785,7 +986,15 @@ async function resumeSession(s: SessionEntry) {
     cwd = await mapProject(s);
     if (!cwd) return;
   }
-  const lock = info.syncEnabled ? await invoke<LockInfo | null>("lock_status", { sessionId: s.id }) : null;
+  let lock: LockInfo | null = null;
+  if (info.syncEnabled) {
+    try {
+      lock = await invoke<LockInfo | null>("lock_status", { sessionId: s.id });
+    } catch (e) {
+      // Offline or target unreachable: the conversation must still open.
+      toast(`Impossible de vérifier si la conversation est ouverte sur un autre PC : ${e}`, "warn", 8000);
+    }
+  }
   if (lock) {
     const choice = await ask(
       `Cette conversation est actuellement ouverte sur « ${lock.machineName} » (depuis ${relativeTime(lock.since)}).\n\n` +
@@ -961,6 +1170,94 @@ function renderFingerprint() {
   const target = readSyncForm($<HTMLFormElement>("#settings-form"), approvedFingerprint);
   $("#fingerprint").textContent =
     target.kind === "sftp" && approvedFingerprint ? `Serveur approuvé — empreinte ${approvedFingerprint}` : "";
+  $("#transport-warning").textContent = transportWarning(target) ?? "";
+}
+
+// ---------- encryption ----------
+
+/** Encryption of the saved target, as last read; drives the buttons. */
+let encryption: EncryptionStatus | null = null;
+
+async function renderEncryption() {
+  const status = $("#encryption-status");
+  const on = $<HTMLButtonElement>("#encryption-on");
+  const off = $<HTMLButtonElement>("#encryption-off");
+  const target = readSyncForm($<HTMLFormElement>("#settings-form"), approvedFingerprint);
+  encryption = null;
+  on.disabled = off.disabled = true;
+  if (target.kind === "none") return;
+  if (JSON.stringify(target) !== JSON.stringify(settings.sync)) {
+    status.textContent = "Enregistre d'abord cette cible pour gérer son chiffrement.";
+    return;
+  }
+  status.textContent = "Vérification…";
+  try {
+    encryption = await invoke<EncryptionStatus | null>("encryption_status");
+  } catch (e) {
+    status.textContent = `État du chiffrement inconnu : ${e}`;
+    return;
+  }
+  if (!encryption) return;
+  const locked = encryption.enabled && !encryption.unlocked;
+  status.textContent = !encryption.enabled
+    ? "Non chiffrée : la cible peut lire les conversations."
+    : locked
+      ? "Chiffrée, mais ce PC n'a pas la phrase de passe : saisis celle utilisée sur tes autres PC."
+      : "Chiffrée ✓ — ce PC a la phrase de passe.";
+  $("#encryption-pass-label").hidden = encryption.enabled && !locked;
+  on.hidden = encryption.enabled && !locked;
+  on.textContent = locked ? "Déverrouiller" : "Activer";
+  off.hidden = !encryption.enabled || locked;
+  on.disabled = off.disabled = false;
+}
+
+async function changeEncryption(enable: boolean) {
+  const passField = settingsField("encryptionPassphrase");
+  const passphrase = passField.value;
+  const unlocking = enable && !!encryption?.enabled;
+  if (enable && !passphrase) return showEncryptionMessage("Saisis la phrase de passe.");
+  if (enable && !unlocking) {
+    const choice = await ask(
+      "Activer le chiffrement de bout en bout ?\n\n" +
+        "• Tous tes PC doivent d'abord avoir cette version de Claude Legend.\n" +
+        "• Saisis ensuite la même phrase de passe sur chacun d'eux.\n" +
+        "• Sans la phrase de passe, les conversations de la cible sont irrécupérables.\n" +
+        "• Les noms des projets et des fichiers restent visibles sur la cible.",
+      [
+        { label: "Annuler", value: "cancel" },
+        { label: "Chiffrer", value: "ok", primary: true },
+      ],
+    );
+    if (choice !== "ok") return;
+  }
+  if (!enable) {
+    const choice = await ask("Désactiver le chiffrement ? Les conversations seront de nouveau lisibles par la cible.", [
+      { label: "Annuler", value: "cancel" },
+      { label: "Désactiver", value: "ok", primary: true },
+    ]);
+    if (choice !== "ok") return;
+  }
+  $<HTMLButtonElement>("#encryption-on").disabled = $<HTMLButtonElement>("#encryption-off").disabled = true;
+  showEncryptionMessage(enable ? "Chiffrement des fichiers de la cible…" : "Déchiffrement des fichiers de la cible…");
+  try {
+    const count = await invoke<number>("set_encryption", { enable, passphrase: passphrase || null });
+    passField.value = "";
+    await renderEncryption();
+    toast(
+      unlocking
+        ? "Phrase de passe enregistrée : ce PC synchronise de nouveau."
+        : enable
+          ? `Chiffrement activé : ${count} fichier(s) chiffré(s).`
+          : `Chiffrement désactivé : ${count} fichier(s) déchiffré(s).`,
+    );
+  } catch (e) {
+    await renderEncryption();
+    showEncryptionMessage(`${e}`);
+  }
+}
+
+function showEncryptionMessage(text: string) {
+  $("#encryption-status").textContent = text;
 }
 
 function showTestResult(text: string, kind: "ok" | "fail" | "" = "") {
@@ -978,6 +1275,7 @@ async function openSettings() {
   settingsField("machineName").value = settings.machineName;
   settingsField("theme").value = themeMode;
   settingsField("autoUpdateCheck").checked = autoCheckEnabled();
+  settingsField("desktopNotifications").checked = notificationsEnabled();
   $("#update-status").textContent = "";
   updateSupport()
     .then((s) => ($("#app-version").textContent = `Version installée : ${s.version}`))
@@ -989,6 +1287,8 @@ async function openSettings() {
   $("#claude-detected").textContent = info.claudePath ? `Détecté : ${info.claudePath}` : info.claudeError ?? "";
   const hasSecret = settings.sync.kind !== "none" && (await invoke<boolean>("has_sync_secret", { target: settings.sync }).catch(() => false));
   settingsField("secret").placeholder = hasSecret ? "enregistré — laisser vide pour le conserver" : "";
+  settingsField("encryptionPassphrase").value = "";
+  renderEncryption();
   const dialog = $<HTMLDialogElement>("#settings-dialog");
   dialog.returnValue = "";
   dialog.showModal();
@@ -1060,6 +1360,7 @@ async function saveSettingsFromForm() {
   settingsField("secret").value = "";
   setThemeMode(settingsField("theme").value as ThemeMode);
   setAutoCheck(settingsField("autoUpdateCheck").checked);
+  setNotificationsEnabled(settingsField("desktopNotifications").checked);
   try {
     await invoke("save_settings", { settings: next, secret });
     settings = next;
@@ -1102,7 +1403,7 @@ async function boot() {
   $("#btn-theme").onclick = () => setThemeMode(theme === "dark" ? "light" : "dark");
   onSystemThemeChange(() => themeMode === "system" && refreshTheme());
   refreshTheme();
-  $("#search").oninput = renderSessions;
+  $("#search").oninput = onSearchInput;
   const settingsForm = $<HTMLFormElement>("#settings-form");
   $("#pick-sync-dir").onclick = async () => {
     const dir = await pickFolder("Dossier synchronisé entre tes PC");
@@ -1113,6 +1414,8 @@ async function boot() {
     if (typeof key === "string") settingsField("keyPath").value = key;
   };
   $("#test-sync").onclick = () => runSyncTest();
+  $("#encryption-on").onclick = () => changeEncryption(true);
+  $("#encryption-off").onclick = () => changeEncryption(false);
   $<HTMLDialogElement>("#rules-dialog").addEventListener("close", (e) => {
     if ((e.target as HTMLDialogElement).returnValue === "save") saveRules();
   });
@@ -1123,15 +1426,15 @@ async function boot() {
   settingsForm.addEventListener("change", (e) => {
     const name = (e.target as HTMLInputElement).name;
     if (name === "syncKind" || name === "sftpAuth") updateSyncVisibility(settingsForm);
+    if (name !== "encryptionPassphrase") renderEncryption();
+    renderFingerprint();
     showTestResult("");
   });
   settingsForm.addEventListener("input", (e) => {
     // A different server needs its own host key approval.
     const name = (e.target as HTMLInputElement).name;
-    if (name === "host" || name === "port") {
-      approvedFingerprint = null;
-      renderFingerprint();
-    }
+    if (name === "host" || name === "port") approvedFingerprint = null;
+    renderFingerprint();
   });
   settingsForm.addEventListener("submit", async (e) => {
     if ((e.submitter as HTMLButtonElement | null)?.value !== "save") return;
@@ -1143,6 +1446,8 @@ async function boot() {
   });
 
   document.addEventListener("keydown", (e) => {
+    // Keys typed in a terminal were already handled by handleKey.
+    if ((e.target as Element | null)?.closest?.(".xterm")) return;
     if (handlePaneShortcut(e)) return e.preventDefault();
     const ctrl = e.ctrlKey || e.metaKey;
     if (ctrl && e.shiftKey && e.key.toLowerCase() === "t") {
@@ -1173,6 +1478,7 @@ async function boot() {
     shuttingDown = true;
   });
   await listen("sessions-changed", () => refreshSessions());
+  await listen<ClaudeEvent>("claude-event", (e) => onClaudeEvent(e.payload));
   window.addEventListener("focus", () => refreshSessions());
   setInterval(refreshSessions, 20000);
   setInterval(() => renderSessions(), 60000);

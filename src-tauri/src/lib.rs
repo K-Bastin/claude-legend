@@ -1,8 +1,12 @@
+mod archive;
 mod config;
+mod conflicts;
+mod events;
 mod paths;
 mod pty;
 mod quota;
 mod rules;
+mod search;
 mod sessions;
 mod store;
 mod sync;
@@ -11,6 +15,7 @@ use config::{Machine, Settings, SyncTarget};
 use portable_pty::PtySize;
 use pty::{Launch, PtyEvent, PtyManager};
 
+pub use events::{relay as hook_relay, RELAY_ARG as HOOK_RELAY_ARG};
 pub use quota::{relay as statusline_relay, RELAY_ARG as STATUSLINE_RELAY_ARG};
 use serde::{Deserialize, Serialize};
 use sessions::SessionIndex;
@@ -30,6 +35,7 @@ struct AppState {
     machine: Machine,
     settings: Mutex<Settings>,
     index: SessionIndex,
+    search: search::SearchIndex,
     ptys: PtyManager,
     /// pty id -> session id
     open: Mutex<HashMap<u32, String>>,
@@ -45,6 +51,18 @@ type CmdResult<T> = Result<T, String>;
 
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
+}
+
+fn check_project_key(key: &str) -> CmdResult<()> {
+    sessions::is_project_key(key)
+        .then_some(())
+        .ok_or_else(|| "projet invalide".into())
+}
+
+fn check_session_id(id: &str) -> CmdResult<()> {
+    sessions::is_session_id(id)
+        .then_some(())
+        .ok_or_else(|| "identifiant de session invalide".into())
 }
 
 impl AppState {
@@ -66,7 +84,8 @@ impl AppState {
         let mut guard = self.remote.lock().unwrap();
         if guard.as_ref().is_none_or(|r| r.target() != &settings.sync) {
             let secret = store::secret::load(&settings.sync);
-            *guard = Some(Remote::new(settings.sync.clone(), secret));
+            let passphrase = store::secret::load_encryption(&settings.sync);
+            *guard = Some(Remote::new(settings.sync.clone(), secret, passphrase));
         }
         let remote = guard.as_mut().unwrap();
         remote.begin();
@@ -75,8 +94,9 @@ impl AppState {
             machine: &self.machine,
             machine_name: &settings.machine_name,
             state_path: self.state_path(),
-            conflicts_dir: self.data_dir.join("conflicts"),
+            conflicts_dir: conflicts::dir(&self.data_dir),
             rules_dir: rules::dir(&self.data_dir),
+            archive_dir: archive::dir(&self.data_dir),
             index: &self.index,
             open_sessions,
             fresh_index: RefCell::new(None),
@@ -114,6 +134,7 @@ struct SessionEntry {
     last_machine: Option<String>,
     locked_by: Option<LockInfo>,
     open_here: bool,
+    archived: bool,
 }
 
 #[derive(Serialize)]
@@ -214,8 +235,9 @@ async fn test_sync(target: SyncTarget, secret: Option<String>) -> CmdResult<Test
 }
 
 #[tauri::command]
-fn get_project_rules(state: State<AppState>, project_key: String) -> String {
-    rules::load(&state.data_dir, &project_key)
+fn get_project_rules(state: State<AppState>, project_key: String) -> CmdResult<String> {
+    check_project_key(&project_key)?;
+    Ok(rules::load(&state.data_dir, &project_key))
 }
 
 /// Last plan usage reported by Claude Code, if any.
@@ -237,13 +259,7 @@ fn save_project_rules(
     project_key: String,
     rules: String,
 ) -> CmdResult<()> {
-    if project_key.is_empty()
-        || !project_key
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-')
-    {
-        return Err("projet invalide".into());
-    }
+    check_project_key(&project_key)?;
     rules::save(&state.data_dir, &project_key, &rules).map_err(err)?;
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
@@ -311,6 +327,11 @@ fn list_sessions(state: State<AppState>) -> Vec<SessionEntry> {
     let hashes = config::load_json::<sync::SyncState>(&state.state_path())
         .unwrap_or_default()
         .hashes;
+    let archived: HashSet<String> = archive::load_all(&archive::dir(&state.data_dir))
+        .into_iter()
+        .filter(|(_, m)| m.archived)
+        .map(|(id, _)| id)
+        .collect();
 
     for local in locals {
         let identity = state.index.project_identity(&local.cwd);
@@ -319,6 +340,7 @@ fn list_sessions(state: State<AppState>) -> Vec<SessionEntry> {
             .as_ref()
             .is_some_and(|(m, _, _)| hashes.get(&format!("s:{}", local.id)) == Some(&m.hash));
         entries.push(SessionEntry {
+            archived: archived.contains(&local.id),
             open_here: open.contains(&local.id),
             locked_by: locks.get(&local.id).cloned(),
             last_machine: remote_meta.map(|(m, _, _)| m.machine_name),
@@ -337,6 +359,7 @@ fn list_sessions(state: State<AppState>) -> Vec<SessionEntry> {
     }
     for (id, (meta, project, mapping)) in remote {
         entries.push(SessionEntry {
+            archived: archived.contains(&id),
             open_here: false,
             locked_by: locks.get(&id).cloned(),
             last_machine: Some(meta.machine_name),
@@ -405,6 +428,7 @@ fn open_session_blocking(
 
     let (session_id, mut args) = match &request.session_id {
         Some(id) => {
+            check_session_id(id)?;
             if let Some(report) = state.with_syncer(|s| s.sync_one(id)) {
                 warnings.extend(report.errors);
                 warnings.extend(report.conflicts);
@@ -432,9 +456,11 @@ fn open_session_blocking(
             args.extend(options.args);
             env = options.env;
         }
-        Err(e) => warnings.push(format!("Suivi du quota indisponible : {e:#}")),
+        Err(e) => warnings.push(format!(
+            "Suivi du quota et notifications indisponibles : {e:#}"
+        )),
     }
-    args.extend(settings.extra_args.split_whitespace().map(str::to_string));
+    args.extend(config::split_args(&settings.extra_args));
 
     if let Some(Err(e)) = state.with_syncer(|s| s.acquire_lock(&session_id)) {
         warnings.push(format!("Verrou de session non posé : {e:#}"));
@@ -482,6 +508,122 @@ fn open_session_blocking(
     })
 }
 
+/// Encryption of the configured sync target, `None` without one.
+#[tauri::command]
+async fn encryption_status(app: AppHandle) -> CmdResult<Option<store::EncryptionStatus>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let target = state.settings.lock().unwrap().sync.clone();
+        if !target.is_enabled() {
+            return Ok(None);
+        }
+        let mut remote = Remote::new(
+            target.clone(),
+            store::secret::load(&target),
+            store::secret::load_encryption(&target),
+        );
+        remote
+            .encryption_status()
+            .map(Some)
+            .map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Turns end-to-end encryption of the sync target on or off, rewriting its
+/// files. `passphrase` (kept in the keyring once it works) is needed to turn
+/// it on, or to unlock a target encrypted from another machine. Returns the
+/// number of files rewritten.
+#[tauri::command]
+async fn set_encryption(
+    app: AppHandle,
+    enable: bool,
+    passphrase: Option<String>,
+) -> CmdResult<u32> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        let target = state.settings.lock().unwrap().sync.clone();
+        if !target.is_enabled() {
+            return Err("Synchronisation non configurée".to_string());
+        }
+        let passphrase = passphrase
+            .filter(|p| !p.is_empty())
+            .or_else(|| store::secret::load_encryption(&target));
+        // Holding the connection lock keeps syncs out while files are rewritten.
+        let mut guard = state.remote.lock().unwrap();
+        let mut remote = Remote::new(
+            target.clone(),
+            store::secret::load(&target),
+            passphrase.clone(),
+        );
+        let rewritten = remote
+            .set_encryption(enable)
+            .map_err(|e| format!("{e:#}"))?;
+        store::secret::save_encryption(&target, passphrase.as_deref().filter(|_| enable))
+            .map_err(err)?;
+        *guard = None;
+        drop(guard);
+        std::thread::spawn(move || {
+            let state = app.state::<AppState>();
+            state.run_full_sync(&app);
+            let _ = app.emit("sessions-changed", ());
+        });
+        Ok(rewritten)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// Conversations of this machine whose messages contain `query`.
+#[tauri::command]
+async fn search_sessions(app: AppHandle, query: String) -> CmdResult<Vec<search::Hit>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        state.search.search(&state.index.scan(), &query)
+    })
+    .await
+    .map_err(err)
+}
+
+/// Archives or restores a conversation, then spreads it with a sync.
+#[tauri::command]
+fn set_archived(
+    app: AppHandle,
+    state: State<AppState>,
+    session_id: String,
+    archived: bool,
+) -> CmdResult<()> {
+    check_session_id(&session_id)?;
+    archive::set(&archive::dir(&state.data_dir), &session_id, archived).map_err(err)?;
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        state.run_full_sync(&app);
+        let _ = app.emit("sessions-changed", ());
+    });
+    Ok(())
+}
+
+/// Versions set aside by sync conflicts, newest first.
+#[tauri::command]
+fn list_conflicts(state: State<AppState>) -> Vec<conflicts::Conflict> {
+    conflicts::list(&conflicts::dir(&state.data_dir))
+}
+
+/// Brings a set-aside version back as a new conversation; returns its id.
+#[tauri::command]
+fn restore_conflict(app: AppHandle, state: State<AppState>, file: String) -> CmdResult<String> {
+    let id = conflicts::restore(&conflicts::dir(&state.data_dir), &file, &state.index)
+        .map_err(|e| format!("{e:#}"))?;
+    let _ = app.emit("sessions-changed", ());
+    Ok(id)
+}
+
+#[tauri::command]
+fn delete_conflict(state: State<AppState>, file: String) -> CmdResult<()> {
+    conflicts::delete(&conflicts::dir(&state.data_dir), &file).map_err(err)
+}
+
 #[tauri::command]
 fn pty_write(state: State<AppState>, id: u32, data: String) -> CmdResult<()> {
     state.ptys.write(id, &data).map_err(err)
@@ -499,6 +641,7 @@ fn pty_kill(state: State<AppState>, id: u32) {
 
 #[tauri::command]
 async fn lock_status(app: AppHandle, session_id: String) -> CmdResult<Option<LockInfo>> {
+    check_session_id(&session_id)?;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         state
@@ -523,6 +666,7 @@ async fn sync_now(app: AppHandle) -> CmdResult<Option<SyncReport>> {
 
 #[tauri::command]
 async fn map_project(app: AppHandle, project_key: String, path: String) -> CmdResult<()> {
+    check_project_key(&project_key)?;
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let identity = state.index.project_identity(&path);
@@ -539,6 +683,16 @@ async fn map_project(app: AppHandle, project_key: String, path: String) -> CmdRe
     })
     .await
     .map_err(err)?
+}
+
+/// Forwards the events left by the hook relay to the page.
+fn events_loop(app: AppHandle, dir: PathBuf) {
+    loop {
+        std::thread::sleep(Duration::from_millis(700));
+        for event in events::drain(&dir) {
+            let _ = app.emit("claude-event", &event);
+        }
+    }
 }
 
 fn background_loop(app: AppHandle) {
@@ -571,6 +725,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let config_dir = app.path().app_config_dir()?;
             let data_dir = app.path().app_data_dir()?;
@@ -582,6 +737,7 @@ pub fn run() {
                 config_dir,
                 data_dir,
                 index: SessionIndex::default(),
+                search: search::SearchIndex::default(),
                 ptys: PtyManager::default(),
                 open: Mutex::new(HashMap::new()),
                 remote: Mutex::new(None),
@@ -590,6 +746,11 @@ pub fn run() {
             });
             let handle = app.handle().clone();
             std::thread::spawn(move || background_loop(handle));
+            let handle = app.handle().clone();
+            let events_dir = events::dir(&app.state::<AppState>().data_dir);
+            // Events of a previous run are stale.
+            events::drain(&events_dir);
+            std::thread::spawn(move || events_loop(handle, events_dir));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -611,6 +772,13 @@ pub fn run() {
             rules_keys,
             get_quota,
             save_project_rules,
+            set_archived,
+            search_sessions,
+            encryption_status,
+            set_encryption,
+            list_conflicts,
+            restore_conflict,
+            delete_conflict,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
