@@ -2,7 +2,7 @@ use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, Pt
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
@@ -13,6 +13,14 @@ use tauri::ipc::Channel;
 pub enum PtyEvent {
     Data { data: String },
     Exit { code: Option<u32> },
+}
+
+/// Program started in a terminal.
+pub struct Launch {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+    pub env: Vec<(String, String)>,
 }
 
 struct PtyHandle {
@@ -71,16 +79,14 @@ fn decode_chunk(pending: &mut Vec<u8>, chunk: &[u8]) -> String {
 impl PtyManager {
     pub fn spawn(
         &self,
-        program: &Path,
-        args: &[String],
-        cwd: &Path,
+        launch: &Launch,
         size: PtySize,
         channel: Channel<PtyEvent>,
         on_exit: impl FnOnce(u32) + Send + 'static,
     ) -> anyhow::Result<u32> {
         let pair = native_pty_system().openpty(size)?;
-        let mut cmd = build_command(program, args);
-        cmd.cwd(cwd);
+        let mut cmd = build_command(&launch.program, &launch.args);
+        cmd.cwd(&launch.cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         // Inherited when the app itself is started from a terminal or from a
@@ -103,6 +109,9 @@ impl PtyManager {
             "CLAUDE_PID",
         ] {
             cmd.env_remove(var);
+        }
+        for (key, value) in &launch.env {
+            cmd.env(key, value);
         }
 
         let mut child = pair.slave.spawn_command(cmd)?;
