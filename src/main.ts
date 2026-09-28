@@ -14,7 +14,7 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { icon } from "./icons";
 import { applyTheme, loadThemeMode, onSystemThemeChange, saveThemeMode, TERMINAL_THEMES, type ThemeMode } from "./theme";
 import { autoCheckEnabled, checkAtStartup, checkNow, setAutoCheck, updateSupport, type InstallHooks } from "./updates";
-import { fillSyncForm, missingSyncField, readSyncForm, updateSyncVisibility, type SyncTarget } from "./sync-form";
+import { fillSyncForm, missingSyncField, readSyncForm, transportWarning, updateSyncVisibility, type SyncTarget } from "./sync-form";
 
 // ---------- types ----------
 
@@ -974,6 +974,7 @@ function renderFingerprint() {
   const target = readSyncForm($<HTMLFormElement>("#settings-form"), approvedFingerprint);
   $("#fingerprint").textContent =
     target.kind === "sftp" && approvedFingerprint ? `Serveur approuvé — empreinte ${approvedFingerprint}` : "";
+  $("#transport-warning").textContent = transportWarning(target) ?? "";
 }
 
 function showTestResult(text: string, kind: "ok" | "fail" | "" = "") {
@@ -1136,15 +1137,14 @@ async function boot() {
   settingsForm.addEventListener("change", (e) => {
     const name = (e.target as HTMLInputElement).name;
     if (name === "syncKind" || name === "sftpAuth") updateSyncVisibility(settingsForm);
+    renderFingerprint();
     showTestResult("");
   });
   settingsForm.addEventListener("input", (e) => {
     // A different server needs its own host key approval.
     const name = (e.target as HTMLInputElement).name;
-    if (name === "host" || name === "port") {
-      approvedFingerprint = null;
-      renderFingerprint();
-    }
+    if (name === "host" || name === "port") approvedFingerprint = null;
+    renderFingerprint();
   });
   settingsForm.addEventListener("submit", async (e) => {
     if ((e.submitter as HTMLButtonElement | null)?.value !== "save") return;

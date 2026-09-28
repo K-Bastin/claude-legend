@@ -138,6 +138,39 @@ pub fn load_or_create_machine(config_dir: &Path) -> Machine {
     machine
 }
 
+/// Splits the extra arguments like a shell would for plain words: separated by
+/// whitespace, with "double" or 'single' quotes keeping spaces together.
+pub fn split_args(line: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    for c in line.chars() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => current.push(c),
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                in_word = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if in_word {
+                    args.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            (None, c) => {
+                current.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if in_word {
+        args.push(current);
+    }
+    args
+}
+
 /// Desktop launchers often start apps with a minimal PATH, so common install
 /// locations are checked too.
 pub fn resolve_claude(settings: &Settings) -> Result<PathBuf, String> {
@@ -179,4 +212,25 @@ pub fn resolve_claude(settings: &Settings) -> Result<PathBuf, String> {
             "Claude Code est introuvable. Installe-le ou indique son chemin dans les réglages."
                 .to_string()
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extra_args_keep_quoted_spaces() {
+        assert_eq!(split_args("  --model   opus "), ["--model", "opus"]);
+        assert_eq!(
+            split_args(r#"--append-system-prompt "Réponds en français" --x 'a b'c"#),
+            [
+                "--append-system-prompt",
+                "Réponds en français",
+                "--x",
+                "a bc"
+            ]
+        );
+        assert_eq!(split_args(r#"--name """#), ["--name", ""]);
+        assert!(split_args("   ").is_empty());
+    }
 }
