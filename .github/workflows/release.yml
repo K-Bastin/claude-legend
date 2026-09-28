@@ -60,9 +60,14 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the updater artifacts; the public key is in tauri.conf.json.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Claude Legend ${{ github.ref_name }}
           releaseBody: Voir le détail des changements ci-dessous.
           releaseDraft: true
           generateReleaseNotes: true
+          # latest.json, read by the in-app updater once the release is published.
+          includeUpdaterJson: true

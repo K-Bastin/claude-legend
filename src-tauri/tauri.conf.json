@@ -36,7 +36,16 @@
       "icons/icon.ico"
     ],
     "shortDescription": "Claude Code avec conversations synchronisées entre PC",
-    "category": "DeveloperTool"
+    "category": "DeveloperTool",
+    "createUpdaterArtifacts": true
   },
-  "mainBinaryName": "claude-legend"
+  "mainBinaryName": "claude-legend",
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEEzODM0RTREMkY3RDBCNTkKUldSWkMzMHZUVTZEby9QRUhEWmx0RGt2WUVBbkVOdlpiQWZpVDRsMEJIeW1uelJIVkVocVowVUoK",
+      "endpoints": [
+        "https://github.com/K-Bastin/claude-legend/releases/latest/download/latest.json"
+      ]
+    }
+  }
 }

@@ -13,6 +13,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { icon } from "./icons";
 import { applyTheme, loadThemeMode, onSystemThemeChange, saveThemeMode, TERMINAL_THEMES, type ThemeMode } from "./theme";
+import { autoCheckEnabled, checkAtStartup, checkNow, setAutoCheck, updateSupport, type InstallHooks } from "./updates";
 import { fillSyncForm, missingSyncField, readSyncForm, updateSyncVisibility, type SyncTarget } from "./sync-form";
 
 // ---------- types ----------
@@ -816,6 +817,19 @@ function sendRaw(tab: Tab, data: string) {
   if (tab.ptyId !== null && !tab.exited) invoke("pty_write", { id: tab.ptyId, data }).catch(() => {});
 }
 
+// ---------- updates ----------
+
+/** The install restarts the app: remember open tabs and keep them through the shutdown. */
+const installHooks: InstallHooks = {
+  before: () => {
+    saveOpenTabs();
+    shuttingDown = true;
+  },
+  failed: () => {
+    shuttingDown = false;
+  },
+};
+
 // ---------- theme ----------
 
 function setThemeMode(mode: ThemeMode) {
@@ -858,6 +872,11 @@ async function openSettings() {
   showTestResult("");
   settingsField("machineName").value = settings.machineName;
   settingsField("theme").value = themeMode;
+  settingsField("autoUpdateCheck").checked = autoCheckEnabled();
+  $("#update-status").textContent = "";
+  updateSupport()
+    .then((s) => ($("#app-version").textContent = `Version installée : ${s.version}`))
+    .catch(() => {});
   settingsField("claudePath").value = settings.claudePath ?? "";
   settingsField("extraArgs").value = settings.extraArgs;
   settingsField("fontSize").value = String(settings.fontSize);
@@ -935,6 +954,7 @@ async function saveSettingsFromForm() {
   const secret = settingsField("secret").value || null;
   settingsField("secret").value = "";
   setThemeMode(settingsField("theme").value as ThemeMode);
+  setAutoCheck(settingsField("autoUpdateCheck").checked);
   try {
     await invoke("save_settings", { settings: next, secret });
     settings = next;
@@ -988,6 +1008,10 @@ async function boot() {
     if (typeof key === "string") settingsField("keyPath").value = key;
   };
   $("#test-sync").onclick = () => runSyncTest();
+  $("#check-updates").onclick = async () => {
+    $("#update-status").textContent = "Recherche…";
+    $("#update-status").textContent = await checkNow(installHooks);
+  };
   settingsForm.addEventListener("change", (e) => {
     const name = (e.target as HTMLInputElement).name;
     if (name === "syncKind" || name === "sftpAuth") updateSyncVisibility(settingsForm);
@@ -1058,6 +1082,7 @@ async function boot() {
 
   await refreshSessions();
   await restoreTabs();
+  setTimeout(() => checkAtStartup(installHooks), 3000);
   if (!info.syncEnabled) {
     toast("Choisis un dossier de synchronisation dans les réglages pour retrouver tes conversations sur tes autres PC.", "info", 10000);
   }
