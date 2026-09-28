@@ -22,11 +22,46 @@ pub fn file_history_dir() -> PathBuf {
     claude_home().join("file-history")
 }
 
-/// Same encoding Claude Code uses for `~/.claude/projects/<dir>`.
+/// Longest encoded name Claude Code keeps before shortening it with a hash.
+const MAX_PROJECT_DIR_LEN: usize = 200;
+
+/// Claude Code's string hash (Java-style, over UTF-16 code units).
+fn claude_hash(s: &str) -> i32 {
+    s.encode_utf16().fold(0i32, |h, c| {
+        h.wrapping_shl(5).wrapping_sub(h).wrapping_add(c as i32)
+    })
+}
+
+fn base36(mut n: u64) -> String {
+    let digits = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut out = Vec::new();
+    loop {
+        out.push(digits[(n % 36) as usize]);
+        n /= 36;
+        if n == 0 {
+            break;
+        }
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap()
+}
+
+/// Same encoding Claude Code uses for `~/.claude/projects/<dir>`: every
+/// non-alphanumeric UTF-16 unit becomes `-`, and long names are cut at 200
+/// characters followed by a hash of the full path.
 pub fn encode_project_dir(cwd: &str) -> String {
-    cwd.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
+    let encoded: String = cwd
+        .encode_utf16()
+        .map(|u| match char::from_u32(u as u32) {
+            Some(c) if c.is_ascii_alphanumeric() => c,
+            _ => '-',
+        })
+        .collect();
+    if encoded.len() <= MAX_PROJECT_DIR_LEN {
+        return encoded;
+    }
+    let hash = (claude_hash(cwd) as i64).unsigned_abs();
+    format!("{}-{}", &encoded[..MAX_PROJECT_DIR_LEN], base36(hash))
 }
 
 pub fn local_project_dir(cwd: &str) -> PathBuf {
@@ -161,5 +196,16 @@ mod tests {
             "-home-kb--local-share-applications"
         );
         assert_eq!(encode_project_dir(r"C:\Users\kb\app"), "C--Users-kb-app");
+        // Emoji are two UTF-16 units, hence two dashes, as in JavaScript.
+        assert_eq!(encode_project_dir("/a/🚀b"), "-a---b");
+    }
+
+    #[test]
+    fn long_paths_are_shortened_like_claude_code() {
+        // Expected value computed with Claude Code's own JavaScript.
+        let long = format!("/home/kb/{}projet", "très-long-dossier/".repeat(14));
+        let encoded = encode_project_dir(&long);
+        assert_eq!(encoded.len(), 207);
+        assert!(encoded.ends_with("ong-d-sjci0h"), "{encoded}");
     }
 }

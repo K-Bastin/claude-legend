@@ -140,8 +140,8 @@ input:focus {
   padding: 10px 10px 6px 14px;
 }
 .brand .logo {
-  color: var(--accent);
-  font-size: 18px;
+  width: 22px;
+  height: 22px;
 }
 .brand .name {
   margin-left: 6px;
@@ -561,8 +561,8 @@ body.dragging * {
   margin: 4px 0 10px;
 }
 .big-logo {
-  font-size: 54px;
-  color: var(--accent);
+  width: 88px;
+  height: 88px;
 }
 .warning {
   color: var(--warn);
