@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
-    /// Folder shared between machines (Syncthing, Nextcloud, OneDrive…).
+    /// Where sessions are synchronised.
+    pub sync: SyncTarget,
+    /// Pre-0.2 setting, migrated into `sync` when loading.
+    #[serde(skip_serializing)]
     pub sync_dir: Option<String>,
     /// Explicit path to the `claude` executable, resolved from PATH otherwise.
     pub claude_path: Option<String>,
@@ -18,12 +21,80 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            sync: SyncTarget::None,
             sync_dir: None,
             claude_path: None,
             extra_args: String::new(),
             machine_name: gethostname::gethostname().to_string_lossy().into_owned(),
             font_size: 14,
             sync_interval_secs: 60,
+        }
+    }
+}
+
+/// Destination shared by every machine. Passwords are never stored here but in
+/// the system keyring, see [`crate::store::secret`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum SyncTarget {
+    #[default]
+    None,
+    /// Folder synchronised by another tool (Syncthing, Nextcloud client, OneDrive…).
+    #[serde(rename_all = "camelCase")]
+    Folder { path: String },
+    #[serde(rename_all = "camelCase")]
+    Sftp {
+        host: String,
+        port: u16,
+        user: String,
+        auth: SftpAuth,
+        /// Private key file, for `SftpAuth::Key`.
+        key_path: Option<String>,
+        /// Remote directory, relative to the login directory unless absolute.
+        path: String,
+        /// Trusted host key, `SHA256:…` as printed by ssh-keygen.
+        fingerprint: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Ftp {
+        host: String,
+        port: u16,
+        user: String,
+        /// Explicit FTPS (AUTH TLS).
+        secure: bool,
+        path: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Webdav {
+        /// Collection URL, e.g. https://cloud.example.com/remote.php/dav/files/me/sync
+        url: String,
+        user: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SftpAuth {
+    Password,
+    Key,
+    Agent,
+}
+
+impl SyncTarget {
+    pub fn is_enabled(&self) -> bool {
+        !matches!(self, SyncTarget::None)
+    }
+
+    /// Short human description, e.g. `SFTP kb@nas.local`.
+    pub fn label(&self) -> String {
+        match self {
+            SyncTarget::None => "désactivée".into(),
+            SyncTarget::Folder { path } => format!("dossier {path}"),
+            SyncTarget::Sftp { host, user, .. } => format!("SFTP {user}@{host}"),
+            SyncTarget::Ftp {
+                host, user, secure, ..
+            } => format!("{} {user}@{host}", if *secure { "FTPS" } else { "FTP" }),
+            SyncTarget::Webdav { url, .. } => format!("WebDAV {url}"),
         }
     }
 }
@@ -46,7 +117,13 @@ pub fn save_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
 }
 
 pub fn load_settings(config_dir: &Path) -> Settings {
-    load_json(&config_dir.join("settings.json")).unwrap_or_default()
+    let mut settings: Settings = load_json(&config_dir.join("settings.json")).unwrap_or_default();
+    if let Some(path) = settings.sync_dir.take().filter(|p| !p.trim().is_empty()) {
+        if !settings.sync.is_enabled() {
+            settings.sync = SyncTarget::Folder { path };
+        }
+    }
+    settings
 }
 
 pub fn load_or_create_machine(config_dir: &Path) -> Machine {

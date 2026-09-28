@@ -55,6 +55,22 @@ http://localhost:1420 dans un navigateur. L'interface y tourne avec des données
 simulés (`src/dev/preview.ts`), pratique pour travailler la mise en page. Ce code n'est jamais
 inclus dans l'application compilée.
 
+**Tester la synchronisation contre de vrais serveurs** : [rclone](https://rclone.org) sait servir
+SFTP, FTP et WebDAV. Par exemple avec podman :
+
+```sh
+podman run -d --rm --name cl-webdav -p 127.0.0.1:18080:8080 docker.io/rclone/rclone \
+  serve webdav /data --addr :8080 --user test --pass secret
+cd src-tauri
+CL_TEST_SECRET=secret CL_TEST_TARGET='{"kind":"webdav","url":"http://127.0.0.1:18080/cl","user":"test"}' \
+  cargo test -- --ignored remote_store
+CL_TEST_SECRET=secret CL_TEST_SYNC_TARGET='{"kind":"webdav","url":"http://127.0.0.1:18080/cl","user":"test"}' \
+  cargo test session_roundtrip
+```
+
+`remote_store_roundtrip` teste les opérations de base du stockage, `session_roundtrip_between_machines`
+fait passer une session entre deux « PC » à travers le serveur.
+
 Le hook `pre-commit` lance `npm run typecheck` et `cargo fmt --check`.
 Avant d'ouvrir une PR, vérifie aussi `cargo clippy --all-targets -- -D warnings` dans `src-tauri/`.
 

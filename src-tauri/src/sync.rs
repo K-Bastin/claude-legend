@@ -1,6 +1,6 @@
-//! Folder based synchronisation.
+//! Synchronisation of sessions through a [`Remote`] store.
 //!
-//! Layout of `<syncDir>/claude-legend/`:
+//! Layout of the store root:
 //! ```text
 //! machines/<machineId>.json
 //! projects/<key>/project.json
@@ -15,12 +15,19 @@
 //! Each file is only ever written by one machine at a time, except
 //! sessions and memory, which are reconciled with a three-way comparison
 //! against the hash recorded at the last sync.
+//!
+//! A cycle starts by indexing the store; if that fails nothing is written, so
+//! a network hiccup can never make a remote session look missing and get
+//! overwritten.
 
 use crate::config::{load_json, save_json, Machine};
 use crate::paths::{self, localize, neutralize, write_atomic};
 use crate::sessions::{LocalSession, ProjectIdentity, SessionIndex};
+use crate::store::{join, Entry, Remote};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -74,9 +81,47 @@ pub struct LockInfo {
     pub heartbeat: u64,
 }
 
+impl LockInfo {
+    /// Held by another machine that is still alive.
+    pub fn is_foreign(&self, machine_id: &str, now: u64) -> bool {
+        self.machine_id != machine_id && now.saturating_sub(self.heartbeat) < LOCK_STALE_MS
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteProject {
+    pub info: ProjectInfo,
+    /// Local path of the project on this machine.
+    pub mapping: Option<String>,
+    pub sessions: Vec<RemoteMeta>,
+}
+
+/// Snapshot of the store, refreshed by every sync. The UI reads it instead of
+/// hitting the network.
+#[derive(Debug, Clone, Default)]
+pub struct RemoteIndex {
+    pub at: u64,
+    pub projects: Vec<RemoteProject>,
+    pub locks: Vec<LockInfo>,
+    /// Sessions whose meta is listed but could not be read (upload in
+    /// progress, file busy…). They are left alone until the next cycle rather
+    /// than treated as missing, which would overwrite them.
+    pub unreadable: HashSet<String>,
+}
+
+impl RemoteIndex {
+    fn project(&self, key: &str) -> Option<&RemoteProject> {
+        self.projects.iter().find(|p| p.info.key == key)
+    }
+
+    fn meta(&self, key: &str, id: &str) -> Option<&RemoteMeta> {
+        self.project(key)?.sessions.iter().find(|m| m.id == id)
+    }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct SyncState {
-    hashes: HashMap<String, String>,
+pub struct SyncState {
+    pub hashes: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -90,7 +135,7 @@ pub struct SyncReport {
 }
 
 pub struct Syncer<'a> {
-    pub root: PathBuf,
+    pub remote: RefCell<&'a mut Remote>,
     pub machine: &'a Machine,
     pub machine_name: &'a str,
     pub state_path: PathBuf,
@@ -98,6 +143,8 @@ pub struct Syncer<'a> {
     pub index: &'a SessionIndex,
     /// Sessions currently running here: never overwritten from the remote.
     pub open_sessions: HashSet<String>,
+    /// Index built at the end of the last `sync_all`.
+    pub fresh_index: RefCell<Option<RemoteIndex>>,
 }
 
 fn sha(data: &str) -> String {
@@ -124,8 +171,7 @@ fn walk_files(dir: &Path) -> Vec<PathBuf> {
         };
         for entry in entries.flatten() {
             let p = entry.path();
-            let name = entry.file_name();
-            if name.to_string_lossy().ends_with(".cl-tmp") {
+            if entry.file_name().to_string_lossy().ends_with(".cl-tmp") {
                 continue;
             }
             if p.is_dir() {
@@ -138,13 +184,61 @@ fn walk_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-pub fn sync_root(sync_dir: &str) -> PathBuf {
-    Path::new(sync_dir).join("claude-legend")
+/// `a/b/c` form of a path relative to `base`.
+fn rel_path(file: &Path, base: &Path) -> Option<String> {
+    let rel = file.strip_prefix(base).ok()?;
+    Some(
+        rel.components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/"),
+    )
+}
+
+fn local_path(base: &Path, rel: &str) -> PathBuf {
+    rel.split('/')
+        .filter(|s| !s.is_empty())
+        .fold(base.to_path_buf(), |p, s| p.join(s))
+}
+
+fn project_dir(key: &str) -> String {
+    format!("projects/{key}")
 }
 
 impl<'a> Syncer<'a> {
-    fn project_dir(&self, key: &str) -> PathBuf {
-        self.root.join("projects").join(key)
+    // ---------- store access ----------
+
+    fn read(&self, path: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        self.remote.borrow_mut().read(path)
+    }
+
+    fn read_text(&self, path: &str) -> anyhow::Result<Option<String>> {
+        Ok(self
+            .read(path)?
+            .map(|d| String::from_utf8_lossy(&d).into_owned()))
+    }
+
+    /// Unreadable JSON (partial upload, foreign file) counts as missing.
+    fn read_json<T: DeserializeOwned>(&self, path: &str) -> anyhow::Result<Option<T>> {
+        Ok(self
+            .read(path)?
+            .and_then(|d| serde_json::from_slice(&d).ok()))
+    }
+
+    fn write(&self, path: &str, data: &[u8]) -> anyhow::Result<()> {
+        self.remote.borrow_mut().write(path, data)
+    }
+
+    fn write_json<T: Serialize>(&self, path: &str, value: &T) -> anyhow::Result<()> {
+        self.write(path, &serde_json::to_vec_pretty(value)?)
+    }
+
+    fn list(&self, dir: &str) -> anyhow::Result<Vec<Entry>> {
+        self.remote.borrow_mut().list(dir)
+    }
+
+    fn walk(&self, dir: &str) -> anyhow::Result<Vec<(String, Entry)>> {
+        self.remote.borrow_mut().walk(dir)
     }
 
     fn load_state(&self) -> SyncState {
@@ -152,11 +246,8 @@ impl<'a> Syncer<'a> {
     }
 
     pub fn register_machine(&self) -> anyhow::Result<()> {
-        save_json(
-            &self
-                .root
-                .join("machines")
-                .join(format!("{}.json", self.machine.id)),
+        self.write_json(
+            &format!("machines/{}.json", self.machine.id),
             &MachineInfo {
                 id: self.machine.id.clone(),
                 name: self.machine_name.to_string(),
@@ -166,21 +257,66 @@ impl<'a> Syncer<'a> {
         )
     }
 
-    pub fn mapping(&self, key: &str) -> Option<String> {
-        load_json::<PathMapping>(
-            &self
-                .project_dir(key)
-                .join("paths")
-                .join(format!("{}.json", self.machine.id)),
-        )
-        .map(|m| m.path)
+    pub fn build_index(&self) -> anyhow::Result<RemoteIndex> {
+        let mapping_name = format!("{}.json", self.machine.id);
+        let mut projects = Vec::new();
+        let mut unreadable = HashSet::new();
+        for dir in self.list("projects")?.into_iter().filter(|e| e.is_dir) {
+            let base = project_dir(&dir.name);
+            // Listing first lets unchanged files come from the cache.
+            self.list(&base)?;
+            let Some(info) = self.read_json::<ProjectInfo>(&join(&base, "project.json"))? else {
+                continue;
+            };
+            let mapping = if self
+                .list(&join(&base, "paths"))?
+                .iter()
+                .any(|e| e.name == mapping_name)
+            {
+                self.read_json::<PathMapping>(&format!("{base}/paths/{mapping_name}"))?
+                    .map(|m| m.path)
+            } else {
+                None
+            };
+            let mut sessions = Vec::new();
+            for entry in self.list(&join(&base, "sessions"))? {
+                let Some(id) = entry.name.strip_suffix(".meta.json") else {
+                    continue;
+                };
+                match self.read_json(&format!("{base}/sessions/{}", entry.name))? {
+                    Some(meta) => sessions.push(meta),
+                    None => {
+                        unreadable.insert(id.to_string());
+                    }
+                }
+            }
+            projects.push(RemoteProject {
+                info,
+                mapping,
+                sessions,
+            });
+        }
+        let mut locks = Vec::new();
+        for entry in self.list("locks")? {
+            if entry.name.ends_with(".json") {
+                if let Some(lock) = self.read_json(&format!("locks/{}", entry.name))? {
+                    locks.push(lock);
+                }
+            }
+        }
+        Ok(RemoteIndex {
+            at: paths::now_ms(),
+            projects,
+            locks,
+            unreadable,
+        })
     }
 
     pub fn set_mapping(&self, identity: &ProjectIdentity, path: &str) -> anyhow::Result<()> {
-        let dir = self.project_dir(&identity.key);
-        let project_file = dir.join("project.json");
-        if !project_file.exists() {
-            save_json(
+        let base = project_dir(&identity.key);
+        let project_file = join(&base, "project.json");
+        if self.read(&project_file)?.is_none() {
+            self.write_json(
                 &project_file,
                 &ProjectInfo {
                     key: identity.key.clone(),
@@ -189,68 +325,34 @@ impl<'a> Syncer<'a> {
                 },
             )?;
         }
-        let mapping_file = dir.join("paths").join(format!("{}.json", self.machine.id));
-        if load_json::<PathMapping>(&mapping_file)
-            .map(|m| m.path)
-            .as_deref()
-            != Some(path)
-        {
-            save_json(
-                &mapping_file,
-                &PathMapping {
-                    path: path.to_string(),
-                },
-            )?;
-        }
-        Ok(())
-    }
-
-    pub fn projects(&self) -> Vec<(ProjectInfo, Option<String>)> {
-        let Ok(entries) = std::fs::read_dir(self.root.join("projects")) else {
-            return Vec::new();
-        };
-        entries
-            .flatten()
-            .filter_map(|e| load_json::<ProjectInfo>(&e.path().join("project.json")))
-            .map(|p| {
-                let mapping = self.mapping(&p.key);
-                (p, mapping)
-            })
-            .collect()
-    }
-
-    pub fn remote_sessions(&self, key: &str) -> Vec<RemoteMeta> {
-        let Ok(entries) = std::fs::read_dir(self.project_dir(key).join("sessions")) else {
-            return Vec::new();
-        };
-        entries
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".meta.json"))
-            .filter_map(|e| load_json(&e.path()))
-            .collect()
+        self.write_json(
+            &format!("{base}/paths/{}.json", self.machine.id),
+            &PathMapping {
+                path: path.to_string(),
+            },
+        )
     }
 
     // ---------- locks ----------
 
-    fn lock_path(&self, id: &str) -> PathBuf {
-        self.root.join("locks").join(format!("{id}.json"))
+    fn lock_path(id: &str) -> String {
+        format!("locks/{id}.json")
     }
 
     /// Returns the lock held by another machine, if it is still alive.
-    pub fn foreign_lock(&self, id: &str) -> Option<LockInfo> {
-        let lock: LockInfo = load_json(&self.lock_path(id))?;
-        (lock.machine_id != self.machine.id
-            && paths::now_ms().saturating_sub(lock.heartbeat) < LOCK_STALE_MS)
-            .then_some(lock)
+    pub fn foreign_lock(&self, id: &str) -> anyhow::Result<Option<LockInfo>> {
+        let lock: Option<LockInfo> = self.read_json(&Self::lock_path(id))?;
+        Ok(lock.filter(|l| l.is_foreign(&self.machine.id, paths::now_ms())))
     }
 
     pub fn acquire_lock(&self, id: &str) -> anyhow::Result<()> {
         let now = paths::now_ms();
-        let since = load_json::<LockInfo>(&self.lock_path(id))
+        let since = self
+            .read_json::<LockInfo>(&Self::lock_path(id))?
             .filter(|l| l.machine_id == self.machine.id)
             .map_or(now, |l| l.since);
-        save_json(
-            &self.lock_path(id),
+        self.write_json(
+            &Self::lock_path(id),
             &LockInfo {
                 session_id: id.to_string(),
                 machine_id: self.machine.id.clone(),
@@ -261,28 +363,37 @@ impl<'a> Syncer<'a> {
         )
     }
 
-    pub fn release_lock(&self, id: &str) {
-        let path = self.lock_path(id);
-        if load_json::<LockInfo>(&path).is_some_and(|l| l.machine_id == self.machine.id) {
-            let _ = std::fs::remove_file(path);
+    pub fn release_lock(&self, id: &str) -> anyhow::Result<()> {
+        let path = Self::lock_path(id);
+        if self
+            .read_json::<LockInfo>(&path)?
+            .is_some_and(|l| l.machine_id == self.machine.id)
+        {
+            self.remote.borrow_mut().delete(&path)?;
         }
+        Ok(())
     }
 
     // ---------- sessions ----------
 
-    /// Full reconciliation of every local and remote session.
+    /// Full reconciliation of every local and remote session. The refreshed
+    /// index is left in `fresh_index`.
     pub fn sync_all(&self) -> SyncReport {
+        self.remote.borrow_mut().begin();
         let mut report = SyncReport {
             at: paths::now_ms(),
             ..Default::default()
         };
+        let mut index = match self.register_machine().and_then(|_| self.build_index()) {
+            Ok(index) => index,
+            Err(e) => {
+                report
+                    .errors
+                    .push(format!("Synchronisation impossible : {e:#}"));
+                return report;
+            }
+        };
         let mut state = self.load_state();
-        if let Err(e) = self.register_machine() {
-            report
-                .errors
-                .push(format!("Dossier de synchro inaccessible : {e}"));
-            return report;
-        }
 
         let locals = self.index.scan();
         let local_ids: HashSet<String> = locals.iter().map(|s| s.id.clone()).collect();
@@ -290,19 +401,23 @@ impl<'a> Syncer<'a> {
         for session in &locals {
             let identity = self.index.project_identity(&session.cwd);
             keys.insert(identity.key.clone());
-            if let Err(e) = self.sync_local_session(session, &identity, &mut state, &mut report) {
-                report.errors.push(format!("{} : {e}", session.title));
+            if let Err(e) =
+                self.sync_local_session(session, &identity, &mut index, &mut state, &mut report)
+            {
+                report.errors.push(format!("{} : {e:#}", session.title));
             }
         }
 
-        for (project, mapping) in self.projects() {
-            let Some(local_root) = mapping else { continue };
-            keys.insert(project.key.clone());
-            for meta in self.remote_sessions(&project.key) {
+        for project in &index.projects {
+            let Some(local_root) = &project.mapping else {
+                continue;
+            };
+            keys.insert(project.info.key.clone());
+            for meta in &project.sessions {
                 if local_ids.contains(&meta.id) {
                     continue;
                 }
-                match self.pull(&project.key, &meta, &local_root) {
+                match self.pull(&project.info.key, meta, local_root) {
                     Ok(true) => {
                         state
                             .hashes
@@ -310,13 +425,13 @@ impl<'a> Syncer<'a> {
                         report.pulled += 1;
                     }
                     Ok(false) => {}
-                    Err(e) => report.errors.push(format!("{} : {e}", meta.title)),
+                    Err(e) => report.errors.push(format!("{} : {e:#}", meta.title)),
                 }
             }
         }
 
         for key in keys {
-            if let Some(local_root) = self.mapping(&key) {
+            if let Some(local_root) = index.project(&key).and_then(|p| p.mapping.clone()) {
                 self.sync_memory(&key, &local_root, &mut state, &mut report);
             }
         }
@@ -324,39 +439,53 @@ impl<'a> Syncer<'a> {
         if let Err(e) = save_json(&self.state_path, &state) {
             report.errors.push(format!("État de synchro : {e}"));
         }
+        match self.build_index() {
+            Ok(index) => *self.fresh_index.borrow_mut() = Some(index),
+            Err(e) => report.errors.push(format!("Index distant : {e:#}")),
+        }
         report
     }
 
     /// Syncs one session before resuming it, so the latest remote turn is used.
     pub fn sync_one(&self, id: &str) -> SyncReport {
+        self.remote.borrow_mut().begin();
         let mut report = SyncReport {
             at: paths::now_ms(),
             ..Default::default()
         };
+        let mut index = match self.build_index() {
+            Ok(index) => index,
+            Err(e) => {
+                report
+                    .errors
+                    .push(format!("Synchronisation impossible : {e:#}"));
+                return report;
+            }
+        };
         let mut state = self.load_state();
         if let Some(session) = self.index.find(id) {
             let identity = self.index.project_identity(&session.cwd);
-            if let Err(e) = self.sync_local_session(&session, &identity, &mut state, &mut report) {
-                report.errors.push(e.to_string());
+            if let Err(e) =
+                self.sync_local_session(&session, &identity, &mut index, &mut state, &mut report)
+            {
+                report.errors.push(format!("{e:#}"));
             }
-        } else {
-            for (project, mapping) in self.projects() {
-                let Some(local_root) = mapping else { continue };
-                if let Some(meta) = self
-                    .remote_sessions(&project.key)
-                    .into_iter()
-                    .find(|m| m.id == id)
-                {
-                    match self.pull(&project.key, &meta, &local_root) {
-                        Ok(true) => {
-                            state.hashes.insert(format!("s:{id}"), meta.hash.clone());
-                            report.pulled += 1;
-                        }
-                        Ok(false) => report
-                            .errors
-                            .push("La session est encore en cours de synchronisation, réessaie dans un instant.".into()),
-                        Err(e) => report.errors.push(e.to_string()),
+        } else if let Some((project, meta)) = index
+            .projects
+            .iter()
+            .find_map(|p| p.sessions.iter().find(|m| m.id == id).map(|m| (p, m)))
+        {
+            if let Some(local_root) = &project.mapping {
+                match self.pull(&project.info.key, meta, local_root) {
+                    Ok(true) => {
+                        state.hashes.insert(format!("s:{id}"), meta.hash.clone());
+                        report.pulled += 1;
                     }
+                    Ok(false) => report.errors.push(
+                        "La session est encore en cours de synchronisation, réessaie dans un instant."
+                            .into(),
+                    ),
+                    Err(e) => report.errors.push(format!("{e:#}")),
                 }
             }
         }
@@ -368,12 +497,33 @@ impl<'a> Syncer<'a> {
         &self,
         session: &LocalSession,
         identity: &ProjectIdentity,
+        index: &mut RemoteIndex,
         state: &mut SyncState,
         report: &mut SyncReport,
     ) -> anyhow::Result<()> {
         // A project gets mapped to the folder where its sessions are run.
-        if self.mapping(&identity.key).is_none() {
+        if index
+            .project(&identity.key)
+            .and_then(|p| p.mapping.as_ref())
+            .is_none()
+        {
             self.set_mapping(identity, &session.cwd)?;
+            match index
+                .projects
+                .iter_mut()
+                .find(|p| p.info.key == identity.key)
+            {
+                Some(project) => project.mapping = Some(session.cwd.clone()),
+                None => index.projects.push(RemoteProject {
+                    info: ProjectInfo {
+                        key: identity.key.clone(),
+                        name: identity.name.clone(),
+                        git_remote: identity.git_remote.clone(),
+                    },
+                    mapping: Some(session.cwd.clone()),
+                    sessions: Vec::new(),
+                }),
+            }
         }
         let key = &identity.key;
         let state_key = format!("s:{}", session.id);
@@ -385,14 +535,12 @@ impl<'a> Syncer<'a> {
             true,
         );
         let local_hash = sha(&local_neutral);
-        let meta_path = self
-            .project_dir(key)
-            .join("sessions")
-            .join(format!("{}.meta.json", session.id));
-        let remote: Option<RemoteMeta> = load_json(&meta_path);
         let base = state.hashes.get(&state_key).cloned();
 
-        let Some(remote) = remote else {
+        let Some(remote) = index.meta(key, &session.id).cloned() else {
+            if index.unreadable.contains(&session.id) {
+                return Ok(());
+            }
             self.push(key, session, &local_neutral, &local_hash)?;
             state.hashes.insert(state_key, local_hash);
             report.pushed += 1;
@@ -413,8 +561,13 @@ impl<'a> Syncer<'a> {
         } else {
             // Both sides moved. Sessions are append-only logs, so when one
             // contains the other the longer one is simply more recent.
-            let remote_text =
-                std::fs::read_to_string(meta_path.with_file_name(format!("{}.jsonl", session.id)))?;
+            let remote_text = self
+                .read_text(&format!(
+                    "{}/sessions/{}.jsonl",
+                    project_dir(key),
+                    session.id
+                ))?
+                .unwrap_or_default();
             if remote_text.starts_with(&local_neutral) {
                 false
             } else if local_neutral.starts_with(&remote_text) {
@@ -459,13 +612,10 @@ impl<'a> Syncer<'a> {
         neutral: &str,
         hash: &str,
     ) -> anyhow::Result<()> {
-        let dir = self.project_dir(key).join("sessions");
-        write_atomic(
-            &dir.join(format!("{}.jsonl", session.id)),
-            neutral.as_bytes(),
-        )?;
-        save_json(
-            &dir.join(format!("{}.meta.json", session.id)),
+        let dir = format!("{}/sessions", project_dir(key));
+        self.write(&format!("{dir}/{}.jsonl", session.id), neutral.as_bytes())?;
+        self.write_json(
+            &format!("{dir}/{}.meta.json", session.id),
             &RemoteMeta {
                 id: session.id.clone(),
                 project_key: key.to_string(),
@@ -480,42 +630,121 @@ impl<'a> Syncer<'a> {
             },
         )?;
         let home = home();
-        let local_extra = session.path.with_extension("");
-        mirror(&local_extra, &dir.join(&session.id), |text| {
-            neutralize(text, &session.cwd, &home, true)
-        });
-        mirror(
+        let to_remote = |text: &str| neutralize(text, &session.cwd, &home, true);
+        self.push_mirror(
+            &session.path.with_extension(""),
+            &format!("{dir}/{}", session.id),
+            &to_remote,
+        )?;
+        self.push_mirror(
             &paths::file_history_dir().join(&session.id),
-            &self.root.join("file-history").join(&session.id),
-            str::to_string,
-        );
-        Ok(())
+            &format!("file-history/{}", session.id),
+            &str::to_string,
+        )
     }
 
     /// Returns `false` when the remote copy is not fully synced yet.
     fn pull(&self, key: &str, meta: &RemoteMeta, local_root: &str) -> anyhow::Result<bool> {
-        let dir = self.project_dir(key).join("sessions");
-        let neutral = std::fs::read_to_string(dir.join(format!("{}.jsonl", meta.id)))?;
+        let dir = format!("{}/sessions", project_dir(key));
+        let Some(neutral) = self.read_text(&format!("{dir}/{}.jsonl", meta.id))? else {
+            return Ok(false);
+        };
         // Syncthing and co. may deliver the meta before the session itself.
         if sha(&neutral) != meta.hash {
             return Ok(false);
         }
         let home = home();
         let project_dir = paths::local_project_dir(local_root);
-        let target = project_dir.join(format!("{}.jsonl", meta.id));
         write_atomic(
-            &target,
+            &project_dir.join(format!("{}.jsonl", meta.id)),
             localize(&neutral, local_root, &home, true).as_bytes(),
         )?;
-        mirror(&dir.join(&meta.id), &project_dir.join(&meta.id), |text| {
-            localize(text, local_root, &home, true)
-        });
-        mirror(
-            &self.root.join("file-history").join(&meta.id),
+        self.pull_mirror(
+            &format!("{dir}/{}", meta.id),
+            &project_dir.join(&meta.id),
+            &|text: &str| localize(text, local_root, &home, true),
+            &|text: &str| neutralize(text, local_root, &home, true),
+        )?;
+        self.pull_mirror(
+            &format!("file-history/{}", meta.id),
             &paths::file_history_dir().join(&meta.id),
-            str::to_string,
-        );
+            &str::to_string,
+            &str::to_string,
+        )?;
         Ok(true)
+    }
+
+    /// Uploads local files whose remote copy is missing or differs in size.
+    /// Text files go through `to_remote` (path placeholders).
+    fn push_mirror(
+        &self,
+        local_dir: &Path,
+        remote_dir: &str,
+        to_remote: &dyn Fn(&str) -> String,
+    ) -> anyhow::Result<()> {
+        if !local_dir.is_dir() {
+            return Ok(());
+        }
+        let remote: HashMap<String, u64> = self
+            .walk(remote_dir)?
+            .into_iter()
+            .map(|(rel, e)| (rel, e.size))
+            .collect();
+        for file in walk_files(local_dir) {
+            let Some(rel) = rel_path(&file, local_dir) else {
+                continue;
+            };
+            let content = if paths::is_text_file(&file) {
+                match std::fs::read_to_string(&file) {
+                    Ok(text) => to_remote(&text).into_bytes(),
+                    Err(_) => continue,
+                }
+            } else {
+                match std::fs::read(&file) {
+                    Ok(bytes) => bytes,
+                    Err(_) => continue,
+                }
+            };
+            if remote.get(&rel) != Some(&(content.len() as u64)) {
+                self.write(&join(remote_dir, &rel), &content)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Downloads remote files missing locally or whose content differs, sizes
+    /// being compared in their machine-independent form.
+    fn pull_mirror(
+        &self,
+        remote_dir: &str,
+        local_dir: &Path,
+        to_local: &dyn Fn(&str) -> String,
+        to_remote: &dyn Fn(&str) -> String,
+    ) -> anyhow::Result<()> {
+        for (rel, entry) in self.walk(remote_dir)? {
+            let target = local_path(local_dir, &rel);
+            let text = paths::is_text_file(&target);
+            let local_size = if text {
+                std::fs::read_to_string(&target)
+                    .ok()
+                    .map(|t| to_remote(&t).len() as u64)
+            } else {
+                std::fs::metadata(&target).ok().map(|m| m.len())
+            };
+            if local_size == Some(entry.size) {
+                continue;
+            }
+            let Some(data) = self.read(&join(remote_dir, &rel))? else {
+                continue;
+            };
+            let data = if text {
+                to_local(&String::from_utf8_lossy(&data)).into_bytes()
+            } else {
+                data
+            };
+            write_atomic(&target, &data)?;
+        }
+        Ok(())
     }
 
     // ---------- memory ----------
@@ -527,25 +756,41 @@ impl<'a> Syncer<'a> {
         state: &mut SyncState,
         report: &mut SyncReport,
     ) {
+        if let Err(e) = self.try_sync_memory(key, local_root, state, report) {
+            report.errors.push(format!("Mémoire de {key} : {e:#}"));
+        }
+    }
+
+    fn try_sync_memory(
+        &self,
+        key: &str,
+        local_root: &str,
+        state: &mut SyncState,
+        report: &mut SyncReport,
+    ) -> anyhow::Result<()> {
         let home = home();
         let local_dir = paths::local_project_dir(local_root).join("memory");
-        let remote_dir = self.project_dir(key).join("memory");
-        let mut rels: HashSet<PathBuf> = HashSet::new();
-        for dir in [&local_dir, &remote_dir] {
-            for f in walk_files(dir) {
-                if let Ok(rel) = f.strip_prefix(dir) {
-                    rels.insert(rel.to_path_buf());
-                }
-            }
-        }
+        let remote_dir = format!("{}/memory", project_dir(key));
+        let remote_files: HashMap<String, Entry> = self.walk(&remote_dir)?.into_iter().collect();
+        let mut rels: HashSet<String> = remote_files.keys().cloned().collect();
+        rels.extend(
+            walk_files(&local_dir)
+                .iter()
+                .filter_map(|f| rel_path(f, &local_dir)),
+        );
+
         for rel in rels {
-            let local = local_dir.join(&rel);
-            let remote = remote_dir.join(&rel);
-            let state_key = format!("m:{key}/{}", rel.to_string_lossy().replace('\\', "/"));
+            let local = local_path(&local_dir, &rel);
+            let remote = join(&remote_dir, &rel);
+            let state_key = format!("m:{key}/{rel}");
             let local_text = std::fs::read_to_string(&local)
                 .ok()
                 .map(|t| neutralize(&t, local_root, &home, false));
-            let remote_text = std::fs::read_to_string(&remote).ok();
+            let remote_text = if remote_files.contains_key(&rel) {
+                self.read_text(&remote)?
+            } else {
+                None
+            };
             let local_hash = local_text.as_deref().map(sha);
             let remote_hash = remote_text.as_deref().map(sha);
             if local_hash == remote_hash {
@@ -564,54 +809,24 @@ impl<'a> Syncer<'a> {
                     } else if base == Some(l) {
                         false
                     } else {
-                        paths::mtime_ms(&local) >= paths::mtime_ms(&remote)
+                        paths::mtime_ms(&local) >= remote_files.get(&rel).map_or(0, |e| e.mtime)
                     }
                 }
                 (None, None) => continue,
             };
-            let result = if push {
+            if push {
                 let text = local_text.unwrap_or_default();
+                self.write(&remote, text.as_bytes())?;
                 state.hashes.insert(state_key, sha(&text));
-                write_atomic(&remote, text.as_bytes())
+                report.pushed += 1;
             } else {
                 let text = remote_text.unwrap_or_default();
+                write_atomic(&local, localize(&text, local_root, &home, false).as_bytes())?;
                 state.hashes.insert(state_key, sha(&text));
-                write_atomic(&local, localize(&text, local_root, &home, false).as_bytes())
-            };
-            match result {
-                Ok(()) if push => report.pushed += 1,
-                Ok(()) => report.pulled += 1,
-                Err(e) => report
-                    .errors
-                    .push(format!("Mémoire {} : {e}", rel.display())),
+                report.pulled += 1;
             }
         }
-    }
-}
-
-/// Copies files from `src` to `dst` when missing or older on the destination.
-/// Text files go through `transform` (path placeholders).
-fn mirror(src: &Path, dst: &Path, transform: impl Fn(&str) -> String) {
-    for file in walk_files(src) {
-        let Ok(rel) = file.strip_prefix(src) else {
-            continue;
-        };
-        let target = dst.join(rel);
-        if target.exists() && paths::mtime_ms(&target) >= paths::mtime_ms(&file) {
-            continue;
-        }
-        let content = if paths::is_text_file(&file) {
-            match std::fs::read_to_string(&file) {
-                Ok(text) => transform(&text).into_bytes(),
-                Err(_) => continue,
-            }
-        } else {
-            match std::fs::read(&file) {
-                Ok(bytes) => bytes,
-                Err(_) => continue,
-            }
-        };
-        let _ = write_atomic(&target, &content);
+        Ok(())
     }
 }
 
@@ -620,21 +835,80 @@ mod tests {
     use super::*;
     use crate::sessions::SessionIndex;
 
+    /// A shared folder, or a real server when `CL_TEST_SYNC_TARGET` holds a
+    /// `SyncTarget` as JSON (password in `CL_TEST_SECRET`); a unique
+    /// sub-directory keeps runs apart.
+    fn remote(shared: &Path) -> Remote {
+        use crate::config::SyncTarget;
+        let run = shared
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let target = match std::env::var("CL_TEST_SYNC_TARGET") {
+            Ok(json) => match serde_json::from_str(&json).unwrap() {
+                SyncTarget::Webdav { url, user } => SyncTarget::Webdav {
+                    url: format!("{url}/{run}"),
+                    user,
+                },
+                SyncTarget::Ftp {
+                    host,
+                    port,
+                    user,
+                    secure,
+                    path,
+                } => SyncTarget::Ftp {
+                    host,
+                    port,
+                    user,
+                    secure,
+                    path: format!("{path}/{run}"),
+                },
+                SyncTarget::Sftp {
+                    host,
+                    port,
+                    user,
+                    auth,
+                    key_path,
+                    path,
+                    fingerprint,
+                } => SyncTarget::Sftp {
+                    host,
+                    port,
+                    user,
+                    auth,
+                    key_path,
+                    path: format!("{path}/{run}"),
+                    fingerprint,
+                },
+                other => other,
+            },
+            Err(_) => SyncTarget::Folder {
+                path: shared.to_string_lossy().into_owned(),
+            },
+        };
+        Remote::new(target, std::env::var("CL_TEST_SECRET").ok())
+    }
+
     fn syncer<'a>(
-        root: &Path,
+        remote: &'a mut Remote,
         machine: &'a Machine,
         name: &'a str,
         data: &Path,
         index: &'a SessionIndex,
     ) -> Syncer<'a> {
+        remote.begin();
         Syncer {
-            root: root.to_path_buf(),
+            remote: RefCell::new(remote),
             machine,
             machine_name: name,
             state_path: data.join("state.json"),
             conflicts_dir: data.join("conflicts"),
             index,
             open_sessions: HashSet::new(),
+            fresh_index: RefCell::new(None),
         }
     }
 
@@ -682,20 +956,24 @@ mod tests {
         )
         .unwrap();
         let (ma, mb) = (Machine { id: "A".into() }, Machine { id: "B".into() });
+        let (mut ra, mut rb) = (remote(&shared), remote(&shared));
         let index_a = SessionIndex::default();
-        let report = syncer(&shared, &ma, "pc-a", &tmp.join("data-a"), &index_a).sync_all();
+        let report = syncer(&mut ra, &ma, "pc-a", &tmp.join("data-a"), &index_a).sync_all();
         assert_eq!(report.errors, Vec::<String>::new());
         assert_eq!(report.pushed, 2);
 
         // Machine B maps the project to its own folder and imports it.
         std::env::set_var("CLAUDE_CONFIG_DIR", &home_b);
         let index_b = SessionIndex::default();
-        let sb = syncer(&shared, &mb, "pc-b", &tmp.join("data-b"), &index_b);
+        let sb = syncer(&mut rb, &mb, "pc-b", &tmp.join("data-b"), &index_b);
         let identity = index_b.project_identity(&pb);
         assert_eq!(identity.key, "local-app");
         sb.set_mapping(&identity, &pb).unwrap();
         let report = sb.sync_all();
         assert_eq!(report.errors, Vec::<String>::new());
+        let fresh = sb.fresh_index.borrow().clone().unwrap();
+        assert_eq!(fresh.projects[0].sessions.len(), 1);
+        assert_eq!(fresh.projects[0].mapping.as_deref(), Some(pb.as_str()));
         let file_b = paths::local_project_dir(&pb).join(format!("{id}.jsonl"));
         let imported = std::fs::read_to_string(&file_b).unwrap();
         assert!(
@@ -717,12 +995,13 @@ mod tests {
         std::io::Write::write_all(&mut f, line(&pb, "suite sur B").as_bytes()).unwrap();
         let report = sb.sync_all();
         assert_eq!((report.pushed, report.pulled), (1, 0));
+        sb.remote.borrow_mut().begin();
         let report = sb.sync_all();
         assert_eq!((report.pushed, report.pulled), (0, 0));
 
         // A gets B's turn with its own paths.
         std::env::set_var("CLAUDE_CONFIG_DIR", &home_a);
-        let report = syncer(&shared, &ma, "pc-a", &tmp.join("data-a"), &index_a).sync_all();
+        let report = syncer(&mut ra, &ma, "pc-a", &tmp.join("data-a"), &index_a).sync_all();
         assert_eq!((report.pushed, report.pulled), (0, 1));
         let back = std::fs::read_to_string(&file_a).unwrap();
         assert!(back.contains("suite sur B"));
@@ -737,10 +1016,11 @@ mod tests {
         std::fs::write(&file_a, format!("{}{}", back, line(&pa, "A diverge"))).unwrap();
         std::env::set_var("CLAUDE_CONFIG_DIR", &home_b);
         std::fs::write(&file_b, line(&pb, "B réécrit")).unwrap();
+        sb.remote.borrow_mut().begin();
         let report = sb.sync_all();
         assert_eq!(report.pushed, 1);
         std::env::set_var("CLAUDE_CONFIG_DIR", &home_a);
-        let report = syncer(&shared, &ma, "pc-a", &tmp.join("data-a"), &index_a).sync_all();
+        let report = syncer(&mut ra, &ma, "pc-a", &tmp.join("data-a"), &index_a).sync_all();
         assert_eq!(report.conflicts.len(), 1, "{report:?}");
         assert_eq!(
             std::fs::read_dir(tmp.join("data-a/conflicts"))
@@ -750,14 +1030,14 @@ mod tests {
         );
 
         // Locks.
-        let sa = syncer(&shared, &ma, "pc-a", &tmp.join("data-a"), &index_a);
+        let sa = syncer(&mut ra, &ma, "pc-a", &tmp.join("data-a"), &index_a);
         sa.acquire_lock(id).unwrap();
-        assert!(sa.foreign_lock(id).is_none());
-        assert_eq!(sb.foreign_lock(id).unwrap().machine_name, "pc-a");
-        sb.release_lock(id);
-        assert!(sb.foreign_lock(id).is_some());
-        sa.release_lock(id);
-        assert!(sb.foreign_lock(id).is_none());
+        assert!(sa.foreign_lock(id).unwrap().is_none());
+        assert_eq!(sb.foreign_lock(id).unwrap().unwrap().machine_name, "pc-a");
+        sb.release_lock(id).unwrap();
+        assert!(sb.foreign_lock(id).unwrap().is_some());
+        sa.release_lock(id).unwrap();
+        assert!(sb.foreign_lock(id).unwrap().is_none());
 
         std::env::remove_var("CLAUDE_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&tmp);

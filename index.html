@@ -44,13 +44,60 @@
     <dialog id="settings-dialog">
       <form method="dialog" id="settings-form">
         <h2>Réglages</h2>
-        <label>Dossier de synchronisation
-          <span class="row">
-            <input name="syncDir" placeholder="ex. ~/Sync (Syncthing, Nextcloud, OneDrive…)" />
-            <button type="button" id="pick-sync-dir">Parcourir…</button>
-          </span>
-          <small>Le même dossier synchronisé sur tous tes PC. Vide = synchronisation désactivée.</small>
-        </label>
+        <fieldset id="sync-fields">
+          <legend>Synchronisation</legend>
+          <label>Type
+            <select name="syncKind">
+              <option value="none">Désactivée</option>
+              <option value="folder">Dossier synchronisé (Syncthing, Nextcloud, OneDrive…)</option>
+              <option value="sftp">Serveur SFTP (SSH)</option>
+              <option value="ftp">Serveur FTP / FTPS</option>
+              <option value="webdav">WebDAV (Nextcloud, ownCloud, NAS…)</option>
+            </select>
+          </label>
+          <label data-kinds="folder">Dossier
+            <span class="row">
+              <input name="folderPath" placeholder="ex. ~/Sync" />
+              <button type="button" id="pick-sync-dir">Parcourir…</button>
+            </span>
+            <small>Le même dossier, synchronisé sur tous tes PC par un autre outil.</small>
+          </label>
+          <label data-kinds="webdav">Adresse WebDAV
+            <input name="webdavUrl" placeholder="https://cloud.exemple.fr/remote.php/dav/files/moi/claude-legend" />
+          </label>
+          <div class="row" data-kinds="sftp ftp">
+            <label>Serveur <input name="host" placeholder="nas.local" /></label>
+            <label class="narrow">Port <input name="port" type="number" min="1" max="65535" /></label>
+          </div>
+          <label data-kinds="sftp ftp webdav">Utilisateur <input name="user" autocomplete="off" /></label>
+          <label data-kinds="sftp">Authentification
+            <select name="sftpAuth">
+              <option value="password">Mot de passe</option>
+              <option value="key">Clé privée</option>
+              <option value="agent">Agent SSH</option>
+            </select>
+          </label>
+          <label data-kinds="sftp-key">Clé privée
+            <span class="row">
+              <input name="keyPath" placeholder="~/.ssh/id_ed25519" />
+              <button type="button" id="pick-key">Parcourir…</button>
+            </span>
+          </label>
+          <label data-kinds="sftp-password sftp-key ftp webdav"><span id="secret-label">Mot de passe</span>
+            <input name="secret" type="password" autocomplete="new-password" />
+            <small>Conservé dans le trousseau du système, jamais dans un fichier.</small>
+          </label>
+          <label data-kinds="ftp" class="check"><input name="ftpSecure" type="checkbox" /> Chiffrer la connexion (FTPS)</label>
+          <label data-kinds="sftp ftp">Dossier distant
+            <input name="remotePath" placeholder="claude-legend" />
+            <small>Relatif au dossier de connexion, ou absolu (/srv/claude-legend).</small>
+          </label>
+          <p id="fingerprint" data-kinds="sftp"></p>
+          <div class="row test-row" data-kinds="folder sftp ftp webdav">
+            <button type="button" id="test-sync">Tester la connexion</button>
+            <span id="test-result"></span>
+          </div>
+        </fieldset>
         <label>Nom de ce PC
           <input name="machineName" required />
         </label>
