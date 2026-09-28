@@ -95,6 +95,8 @@ const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as
 let settings: Settings;
 let info: AppInfo;
 let sessions: SessionEntry[] = [];
+/** Projects that have rules, see openRules. */
+let rulesKeys = new Set<string>();
 let lastReport: SyncReport | null = null;
 let syncing = false;
 const tabs: Tab[] = [];
@@ -202,6 +204,7 @@ function quotePath(p: string): string {
 async function refreshSessions() {
   try {
     sessions = await invoke<SessionEntry[]>("list_sessions");
+    rulesKeys = new Set(await invoke<string[]>("rules_keys"));
   } catch (e) {
     toast(`Lecture des sessions impossible : ${e}`, "error");
   }
@@ -241,10 +244,21 @@ function renderSessions() {
         if (path) startNewSession(path);
       });
     };
+    const hasRules = rulesKeys.has(first.projectKey);
+    const rulesBtn = el("button", {
+      className: `icon${hasRules ? " has-rules" : ""}`,
+      innerHTML: icon("rules"),
+      title: hasRules ? "Règles du projet (définies)" : "Définir des règles pour ce projet",
+    });
+    rulesBtn.onclick = (e) => {
+      e.stopPropagation();
+      openRules(first.projectKey, first.projectName);
+    };
     const header = el(
       "div",
       { className: "project-header", title: cwd ?? "Projet pas encore présent sur ce PC" },
       el("span", { className: "pname", textContent: first.projectName }),
+      rulesBtn,
       addBtn,
     );
     const items = group.map((s) => {
@@ -817,6 +831,40 @@ function sendRaw(tab: Tab, data: string) {
   if (tab.ptyId !== null && !tab.exited) invoke("pty_write", { id: tab.ptyId, data }).catch(() => {});
 }
 
+// ---------- project rules ----------
+
+let rulesProject: { key: string; name: string } | null = null;
+
+async function openRules(key: string, name: string) {
+  rulesProject = { key, name };
+  const form = $<HTMLFormElement>("#rules-form");
+  $("#rules-title").textContent = `Règles du projet « ${name} »`;
+  const textarea = form.elements.namedItem("rules") as HTMLTextAreaElement;
+  textarea.value = await invoke<string>("get_project_rules", { projectKey: key }).catch(() => "");
+  const dialog = $<HTMLDialogElement>("#rules-dialog");
+  dialog.returnValue = "";
+  dialog.showModal();
+  textarea.focus();
+}
+
+async function saveRules() {
+  if (!rulesProject) return;
+  const { key, name } = rulesProject;
+  const rules = ($<HTMLFormElement>("#rules-form").elements.namedItem("rules") as HTMLTextAreaElement).value;
+  try {
+    await invoke("save_project_rules", { projectKey: key, rules });
+    const open = tabs.some((t) => !t.exited && sessions.find((s) => s.id === t.sessionId)?.projectKey === key);
+    toast(
+      `Règles de « ${name} » enregistrées.` + (open ? "\nRelance les conversations ouvertes de ce projet pour les appliquer." : ""),
+      "info",
+      open ? 9000 : 4000,
+    );
+    await refreshSessions();
+  } catch (e) {
+    toast(`Règles non enregistrées : ${e}`, "error");
+  }
+}
+
 // ---------- updates ----------
 
 /** The install restarts the app: remember open tabs and keep them through the shutdown. */
@@ -1008,6 +1056,9 @@ async function boot() {
     if (typeof key === "string") settingsField("keyPath").value = key;
   };
   $("#test-sync").onclick = () => runSyncTest();
+  $<HTMLDialogElement>("#rules-dialog").addEventListener("close", (e) => {
+    if ((e.target as HTMLDialogElement).returnValue === "save") saveRules();
+  });
   $("#check-updates").onclick = async () => {
     $("#update-status").textContent = "Recherche…";
     $("#update-status").textContent = await checkNow(installHooks);

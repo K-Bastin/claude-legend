@@ -1,6 +1,7 @@
 mod config;
 mod paths;
 mod pty;
+mod rules;
 mod sessions;
 mod store;
 mod sync;
@@ -72,6 +73,7 @@ impl AppState {
             machine_name: &settings.machine_name,
             state_path: self.state_path(),
             conflicts_dir: self.data_dir.join("conflicts"),
+            rules_dir: rules::dir(&self.data_dir),
             index: &self.index,
             open_sessions,
             fresh_index: RefCell::new(None),
@@ -206,6 +208,39 @@ async fn test_sync(target: SyncTarget, secret: Option<String>) -> CmdResult<Test
     })
     .await
     .map_err(err)?
+}
+
+#[tauri::command]
+fn get_project_rules(state: State<AppState>, project_key: String) -> String {
+    rules::load(&state.data_dir, &project_key)
+}
+
+#[tauri::command]
+fn rules_keys(state: State<AppState>) -> Vec<String> {
+    rules::keys_with_rules(&state.data_dir)
+}
+
+/// Saves the rules and pushes them right away when sync is configured.
+#[tauri::command]
+fn save_project_rules(
+    app: AppHandle,
+    state: State<AppState>,
+    project_key: String,
+    rules: String,
+) -> CmdResult<()> {
+    if project_key.is_empty()
+        || !project_key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err("projet invalide".into());
+    }
+    rules::save(&state.data_dir, &project_key, &rules).map_err(err)?;
+    std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        state.run_full_sync(&app);
+    });
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -370,6 +405,12 @@ fn open_session_blocking(
             (id.clone(), vec!["--session-id".to_string(), id])
         }
     };
+    // Project rules live outside the project and reach Claude through its system prompt.
+    let identity = state.index.project_identity(&request.cwd);
+    if let Some(file) = rules::prompt_file(&state.data_dir, &identity.key) {
+        args.push("--append-system-prompt-file".into());
+        args.push(file.to_string_lossy().into_owned());
+    }
     args.extend(settings.extra_args.split_whitespace().map(str::to_string));
 
     if let Some(Err(e)) = state.with_syncer(|s| s.acquire_lock(&session_id)) {
@@ -540,6 +581,9 @@ pub fn run() {
             test_sync,
             has_sync_secret,
             update_support,
+            get_project_rules,
+            rules_keys,
+            save_project_rules,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -149,6 +149,24 @@
       </form>
     </dialog>
 
+    <dialog id="rules-dialog">
+      <form method="dialog" id="rules-form">
+        <h2 id="rules-title"></h2>
+        <p class="dialog-hint">
+          Ajoutées aux instructions de Claude pour toutes les conversations de ce projet, sans aucun
+          fichier dans le projet ni dans git. Partagées avec tes autres PC — et ton équipe — via la
+          synchronisation.
+        </p>
+        <textarea name="rules" rows="14" spellcheck="false"
+          placeholder="Ex. : Réponds en français. Les tests sont en anglais. N'utilise jamais de valeurs sentinelles."></textarea>
+        <p class="dialog-hint">Prises en compte au prochain lancement ou à la prochaine reprise d'une conversation du projet.</p>
+        <menu>
+          <button value="cancel" formnovalidate>Annuler</button>
+          <button value="save" class="primary">Enregistrer</button>
+        </menu>
+      </form>
+    </dialog>
+
     <dialog id="update-dialog">
       <h2 id="update-title"></h2>
       <p id="update-versions"></p>

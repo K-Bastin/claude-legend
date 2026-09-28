@@ -49,6 +49,14 @@ Gestionnaire d'identifiants sous Windows), jamais dans les fichiers de réglages
 
 Glisser-déposer un fichier dans le terminal insère son chemin.
 
+### Règles par projet
+
+L'icône « document » dans l'en-tête d'un projet ouvre ses règles : des instructions ajoutées à
+Claude pour toutes les conversations du projet (`claude --append-system-prompt-file`), sans
+`CLAUDE.md` ni aucun fichier dans le projet ou dans git. Elles sont partagées via la
+synchronisation avec tes autres PC — et ton équipe si elle utilise la même destination — et
+prises en compte au prochain lancement ou à la prochaine reprise d'une conversation.
+
 ### Mises à jour
 
 Au lancement, l'application vérifie la dernière release publiée sur GitHub et propose de l'installer

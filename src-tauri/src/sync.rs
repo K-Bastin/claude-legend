@@ -94,6 +94,8 @@ pub struct RemoteProject {
     /// Local path of the project on this machine.
     pub mapping: Option<String>,
     pub sessions: Vec<RemoteMeta>,
+    /// `rules.md` exists for the project, see [`crate::rules`].
+    pub has_rules: bool,
 }
 
 /// Snapshot of the store, refreshed by every sync. The UI reads it instead of
@@ -140,6 +142,8 @@ pub struct Syncer<'a> {
     pub machine_name: &'a str,
     pub state_path: PathBuf,
     pub conflicts_dir: PathBuf,
+    /// Local copies of the project rules.
+    pub rules_dir: PathBuf,
     pub index: &'a SessionIndex,
     /// Sessions currently running here: never overwritten from the remote.
     pub open_sessions: HashSet<String>,
@@ -264,7 +268,10 @@ impl<'a> Syncer<'a> {
         for dir in self.list("projects")?.into_iter().filter(|e| e.is_dir) {
             let base = project_dir(&dir.name);
             // Listing first lets unchanged files come from the cache.
-            self.list(&base)?;
+            let has_rules = self
+                .list(&base)?
+                .iter()
+                .any(|e| !e.is_dir && e.name == "rules.md");
             let Some(info) = self.read_json::<ProjectInfo>(&join(&base, "project.json"))? else {
                 continue;
             };
@@ -294,6 +301,7 @@ impl<'a> Syncer<'a> {
                 info,
                 mapping,
                 sessions,
+                has_rules,
             });
         }
         let mut locks = Vec::new();
@@ -436,6 +444,8 @@ impl<'a> Syncer<'a> {
             }
         }
 
+        self.sync_rules(&index, &mut state, &mut report);
+
         if let Err(e) = save_json(&self.state_path, &state) {
             report.errors.push(format!("État de synchro : {e}"));
         }
@@ -522,6 +532,7 @@ impl<'a> Syncer<'a> {
                     },
                     mapping: Some(session.cwd.clone()),
                     sessions: Vec::new(),
+                    has_rules: false,
                 }),
             }
         }
@@ -780,53 +791,123 @@ impl<'a> Syncer<'a> {
         );
 
         for rel in rels {
-            let local = local_path(&local_dir, &rel);
-            let remote = join(&remote_dir, &rel);
-            let state_key = format!("m:{key}/{rel}");
-            let local_text = std::fs::read_to_string(&local)
-                .ok()
-                .map(|t| neutralize(&t, local_root, &home, false));
-            let remote_text = if remote_files.contains_key(&rel) {
-                self.read_text(&remote)?
-            } else {
-                None
-            };
-            let local_hash = local_text.as_deref().map(sha);
-            let remote_hash = remote_text.as_deref().map(sha);
-            if local_hash == remote_hash {
-                if let Some(h) = local_hash {
-                    state.hashes.insert(state_key, h);
-                }
-                continue;
-            }
-            let base = state.hashes.get(&state_key);
-            let push = match (&local_hash, &remote_hash) {
-                (Some(_), None) => true,
-                (None, Some(_)) => false,
-                (Some(l), Some(r)) => {
-                    if base == Some(r) {
-                        true
-                    } else if base == Some(l) {
-                        false
-                    } else {
-                        paths::mtime_ms(&local) >= remote_files.get(&rel).map_or(0, |e| e.mtime)
-                    }
-                }
-                (None, None) => continue,
-            };
-            if push {
-                let text = local_text.unwrap_or_default();
-                self.write(&remote, text.as_bytes())?;
-                state.hashes.insert(state_key, sha(&text));
-                report.pushed += 1;
-            } else {
-                let text = remote_text.unwrap_or_default();
-                write_atomic(&local, localize(&text, local_root, &home, false).as_bytes())?;
-                state.hashes.insert(state_key, sha(&text));
-                report.pulled += 1;
+            let changed = self.reconcile_file(
+                &local_path(&local_dir, &rel),
+                &join(&remote_dir, &rel),
+                remote_files.get(&rel),
+                format!("m:{key}/{rel}"),
+                state,
+                &|t| neutralize(t, local_root, &home, false),
+                &|t| localize(t, local_root, &home, false),
+            )?;
+            match changed {
+                Some(true) => report.pushed += 1,
+                Some(false) => report.pulled += 1,
+                None => {}
             }
         }
         Ok(())
+    }
+
+    /// Three-way sync of one small text file against the hash recorded at the
+    /// last sync; when both sides changed, the newest wins. Returns
+    /// `Some(true)` when pushed, `Some(false)` when pulled.
+    #[allow(clippy::too_many_arguments)]
+    fn reconcile_file(
+        &self,
+        local: &Path,
+        remote: &str,
+        remote_entry: Option<&Entry>,
+        state_key: String,
+        state: &mut SyncState,
+        to_remote: &dyn Fn(&str) -> String,
+        to_local: &dyn Fn(&str) -> String,
+    ) -> anyhow::Result<Option<bool>> {
+        let local_text = std::fs::read_to_string(local).ok().map(|t| to_remote(&t));
+        let remote_text = match remote_entry {
+            Some(_) => self.read_text(remote)?,
+            None => None,
+        };
+        let local_hash = local_text.as_deref().map(sha);
+        let remote_hash = remote_text.as_deref().map(sha);
+        if local_hash == remote_hash {
+            if let Some(h) = local_hash {
+                state.hashes.insert(state_key, h);
+            }
+            return Ok(None);
+        }
+        let base = state.hashes.get(&state_key);
+        let push = match (&local_hash, &remote_hash) {
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (Some(l), Some(r)) => {
+                if base == Some(r) {
+                    true
+                } else if base == Some(l) {
+                    false
+                } else {
+                    paths::mtime_ms(local) >= remote_entry.map_or(0, |e| e.mtime)
+                }
+            }
+            (None, None) => return Ok(None),
+        };
+        if push {
+            let text = local_text.unwrap_or_default();
+            self.write(remote, text.as_bytes())?;
+            state.hashes.insert(state_key, sha(&text));
+        } else {
+            let text = remote_text.unwrap_or_default();
+            write_atomic(local, to_local(&text).as_bytes())?;
+            state.hashes.insert(state_key, sha(&text));
+        }
+        Ok(Some(push))
+    }
+
+    // ---------- rules ----------
+
+    /// Syncs project rules for every project known to the store. Rules of a
+    /// project not in the store yet wait until its sessions create it.
+    fn sync_rules(&self, index: &RemoteIndex, state: &mut SyncState, report: &mut SyncReport) {
+        let local_keys: HashSet<String> = std::fs::read_dir(&self.rules_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .strip_suffix(".md")
+                    .map(str::to_string)
+            })
+            .collect();
+        for project in &index.projects {
+            let key = &project.info.key;
+            if !project.has_rules && !local_keys.contains(key) {
+                continue;
+            }
+            let remote = format!("{}/rules.md", project_dir(key));
+            let result = self.list(&project_dir(key)).and_then(|entries| {
+                let entry = entries
+                    .into_iter()
+                    .find(|e| !e.is_dir && e.name == "rules.md");
+                self.reconcile_file(
+                    &self.rules_dir.join(format!("{key}.md")),
+                    &remote,
+                    entry.as_ref(),
+                    format!("r:{key}"),
+                    state,
+                    &str::to_string,
+                    &str::to_string,
+                )
+            });
+            match result {
+                Ok(Some(true)) => report.pushed += 1,
+                Ok(Some(false)) => report.pulled += 1,
+                Ok(None) => {}
+                Err(e) => report
+                    .errors
+                    .push(format!("Règles de {} : {e:#}", project.info.name)),
+            }
+        }
     }
 }
 
@@ -906,6 +987,7 @@ mod tests {
             machine_name: name,
             state_path: data.join("state.json"),
             conflicts_dir: data.join("conflicts"),
+            rules_dir: data.join("rules"),
             index,
             open_sessions: HashSet::new(),
             fresh_index: RefCell::new(None),
@@ -955,12 +1037,17 @@ mod tests {
             format!("projet dans {pa}"),
         )
         .unwrap();
+        crate::paths::write_atomic(
+            &tmp.join("data-a/rules/local-app.md"),
+            "Réponds en français.".as_bytes(),
+        )
+        .unwrap();
         let (ma, mb) = (Machine { id: "A".into() }, Machine { id: "B".into() });
         let (mut ra, mut rb) = (remote(&shared), remote(&shared));
         let index_a = SessionIndex::default();
         let report = syncer(&mut ra, &ma, "pc-a", &tmp.join("data-a"), &index_a).sync_all();
         assert_eq!(report.errors, Vec::<String>::new());
-        assert_eq!(report.pushed, 2);
+        assert_eq!(report.pushed, 3);
 
         // Machine B maps the project to its own folder and imports it.
         std::env::set_var("CLAUDE_CONFIG_DIR", &home_b);
@@ -985,6 +1072,10 @@ mod tests {
             std::fs::read_to_string(paths::local_project_dir(&pb).join("memory/MEMORY.md"))
                 .unwrap();
         assert_eq!(memory, format!("projet dans {pb}"));
+        assert_eq!(
+            std::fs::read_to_string(tmp.join("data-b/rules/local-app.md")).unwrap(),
+            "Réponds en français."
+        );
 
         // B continues the conversation; a second sync is a no-op.
         std::thread::sleep(std::time::Duration::from_millis(20));
