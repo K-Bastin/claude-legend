@@ -6,6 +6,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 
 const RELEASES_URL = "https://github.com/K-Bastin/claude-legend/releases";
+const RELEASE_API_URL = "https://api.github.com/repos/K-Bastin/claude-legend/releases/tags";
 const AUTO_CHECK_KEY = "claude-legend:auto-update-check";
 
 export interface UpdateSupport {
@@ -51,14 +52,71 @@ export function setAutoCheck(enabled: boolean) {
   store(AUTO_CHECK_KEY, enabled ? "on" : "off");
 }
 
-/** Release notes without the generated PR list, install table and markdown marks. */
-function summarizeNotes(body: string | undefined): string {
-  if (!body) return "";
-  const end = body.search(/^## (Installation|What's Changed)/m);
-  return (end === -1 ? body : body.slice(0, end))
-    .replace(/^#+\s*/gm, "")
-    .replace(/\*\*|`/g, "")
-    .trim();
+/**
+ * Notes of the release as currently shown on GitHub. latest.json carries the
+ * notes as they were when the release was built, before they were written, so
+ * they are only a fallback.
+ */
+async function releaseNotes(version: string, fallback: string | undefined): Promise<string> {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 5000);
+  try {
+    const response = await fetch(`${RELEASE_API_URL}/v${version}`, {
+      headers: { Accept: "application/vnd.github+json" },
+      signal: abort.signal,
+    });
+    if (response.ok) {
+      const release = (await response.json()) as { body?: string };
+      if (release.body?.trim()) return release.body;
+    }
+  } catch {
+    // Offline or rate-limited: fall back to latest.json.
+  } finally {
+    clearTimeout(timer);
+  }
+  return fallback ?? "";
+}
+
+/** Inline **bold** and `code`, built as text nodes so release notes can't inject markup. */
+function inline(text: string): Node[] {
+  return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/).filter(Boolean).map((part) => {
+    if (part.startsWith("**") && part.endsWith("**")) return Object.assign(document.createElement("strong"), { textContent: part.slice(2, -2) });
+    if (part.startsWith("`") && part.endsWith("`")) return Object.assign(document.createElement("code"), { textContent: part.slice(1, -1) });
+    return document.createTextNode(part);
+  });
+}
+
+/**
+ * The user-facing part of the notes (from the first heading, without the
+ * install table and the generated PR list), as headings, lists and paragraphs.
+ */
+function renderNotes(markdown: string): Node[] {
+  let text = markdown.replace(/\r/g, "");
+  const firstHeading = text.search(/^#{1,6} /m);
+  if (firstHeading > 0) text = text.slice(firstHeading);
+  const end = text.search(/^#{1,6} (Installation|What's Changed)/m);
+  if (end !== -1) text = text.slice(0, end);
+
+  const nodes: Node[] = [];
+  let list: HTMLUListElement | null = null;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    const item = /^[-*] (.*)/.exec(line);
+    if (item) {
+      list ??= nodes[nodes.push(document.createElement("ul")) - 1] as HTMLUListElement;
+      const li = document.createElement("li");
+      li.append(...inline(item[1]));
+      list.append(li);
+      continue;
+    }
+    list = null;
+    if (!line || line.startsWith("|") || line.startsWith(">")) continue;
+    const heading = /^#{1,6} (.*)/.exec(line);
+    const node = document.createElement(heading ? "h3" : "p");
+    node.append(...inline(heading ? heading[1] : line));
+    nodes.push(node);
+  }
+  return nodes;
 }
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector(sel) as T;
@@ -73,7 +131,9 @@ export async function showUpdate(update: Update, hooks: InstallHooks) {
 
   $("#update-title").textContent = `Claude Legend ${update.version} est disponible`;
   $("#update-versions").textContent = `Version installée : ${update.currentVersion}`;
-  $("#update-notes").textContent = summarizeNotes(update.body);
+  const notes = $("#update-notes");
+  notes.replaceChildren(...renderNotes(update.body ?? ""));
+  releaseNotes(update.version, update.body).then((body) => notes.replaceChildren(...renderNotes(body)));
   $("#update-hint").textContent = selfUpdate
     ? "Les conversations ouvertes seront fermées puis rouvertes automatiquement après le redémarrage."
     : "Application installée par paquet (.rpm / .deb) : télécharge le nouveau paquet et installe-le comme le précédent.";
