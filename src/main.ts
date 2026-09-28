@@ -504,6 +504,8 @@ function renderPanes() {
   const grid = $("#terminals");
   grid.className = `layout-${layout}`;
   grid.replaceChildren(...nodes);
+  // With no conversation open only the welcome screen shows, not an empty pane under it.
+  grid.hidden = tabs.length === 0;
   $("#welcome").classList.toggle("hidden", tabs.length > 0);
   $("#tabbar").classList.toggle("hidden", tabs.length === 0);
   requestAnimationFrame(() => panes.forEach((t) => t?.fit.fit()));
