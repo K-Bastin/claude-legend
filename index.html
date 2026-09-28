@@ -125,6 +125,16 @@
             <input name="syncIntervalSecs" type="number" min="15" max="3600" />
           </label>
         </div>
+        <fieldset>
+          <legend>Mises à jour</legend>
+          <div class="row test-row">
+            <span id="app-version"></span>
+            <span class="spacer"></span>
+            <button type="button" id="check-updates">Rechercher</button>
+          </div>
+          <p id="update-status"></p>
+          <label class="check"><input name="autoUpdateCheck" type="checkbox" /> Vérifier au lancement</label>
+        </fieldset>
         <menu>
           <button value="cancel" formnovalidate>Annuler</button>
           <button value="save" class="primary">Enregistrer</button>
@@ -137,6 +147,19 @@
         <p id="confirm-message"></p>
         <menu id="confirm-buttons"></menu>
       </form>
+    </dialog>
+
+    <dialog id="update-dialog">
+      <h2 id="update-title"></h2>
+      <p id="update-versions"></p>
+      <div id="update-notes"></div>
+      <p id="update-hint"></p>
+      <progress id="update-progress" max="100" value="0" hidden></progress>
+      <p id="update-error"></p>
+      <menu>
+        <button type="button" id="update-later">Plus tard</button>
+        <button type="button" id="update-install" class="primary"></button>
+      </menu>
     </dialog>
 
     <div id="toasts"></div>

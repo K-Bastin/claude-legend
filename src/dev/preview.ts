@@ -152,6 +152,37 @@ export function installPreview() {
           pty?.channel.onmessage({ kind: "exit", code: 0 });
           return null;
         }
+        case "update_support":
+          return { version: "0.2.0", selfUpdate: true };
+        case "plugin:updater|check":
+          return {
+            rid: 1,
+            currentVersion: "0.2.0",
+            version: "0.3.0",
+            date: new Date().toISOString(),
+            body: "Claude Code dans une application desktop.\n\n## Nouveautés\n\n- **Mises à jour** intégrées\n- Aperçu des notes\n\n## What's Changed\n* liste générée",
+            rawJson: {},
+          };
+        case "plugin:updater|download_and_install": {
+          const channel = a.onEvent as { onmessage: (e: unknown) => void };
+          const total = 5_000_000;
+          channel.onmessage({ event: "Started", data: { contentLength: total } });
+          return new Promise((resolve) => {
+            let sent = 0;
+            const timer = setInterval(() => {
+              sent += 500_000;
+              channel.onmessage({ event: "Progress", data: { chunkLength: 500_000 } });
+              if (sent >= total) {
+                clearInterval(timer);
+                channel.onmessage({ event: "Finished" });
+                resolve(null);
+              }
+            }, 150);
+          });
+        }
+        case "plugin:process|restart":
+          location.reload();
+          return null;
         case "plugin:clipboard-manager|read_text":
           return "";
         case "plugin:dialog|open":

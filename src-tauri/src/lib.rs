@@ -208,6 +208,23 @@ async fn test_sync(target: SyncTarget, secret: Option<String>) -> CmdResult<Test
     .map_err(err)?
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateSupport {
+    version: String,
+    /// The updater can replace the app itself: Windows installers and
+    /// AppImage. .deb/.rpm installs belong to the package manager.
+    self_update: bool,
+}
+
+#[tauri::command]
+fn update_support(app: AppHandle) -> UpdateSupport {
+    UpdateSupport {
+        version: app.package_info().version.to_string(),
+        self_update: cfg!(windows) || std::env::var_os("APPIMAGE").is_some(),
+    }
+}
+
 #[tauri::command]
 fn has_sync_secret(target: SyncTarget) -> bool {
     store::secret::has(&target)
@@ -485,6 +502,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let config_dir = app.path().app_config_dir()?;
             let data_dir = app.path().app_data_dir()?;
@@ -520,6 +539,7 @@ pub fn run() {
             map_project,
             test_sync,
             has_sync_secret,
+            update_support,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
