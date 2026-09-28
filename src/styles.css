@@ -8,11 +8,35 @@
   --muted: #9a938a;
   --accent: #d97757;
   --accent-soft: #d9775733;
+  --on-accent: #fff;
   --ok: #7fb069;
   --warn: #e0a84f;
+  --warn-soft: #e0a84f26;
   --danger: #e06c5f;
+  --shadow: #0008;
+  --backdrop: #0009;
   --mono: "JetBrains Mono", "Cascadia Mono", "Fira Code", "DejaVu Sans Mono", Consolas, monospace;
   color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg: #faf9f5;
+  --bg-side: #f0eee6;
+  --bg-hover: #e7e4d9;
+  --bg-active: #dedacd;
+  --border: #d9d5c8;
+  --text: #1f1e1d;
+  --muted: #6b665c;
+  --accent: #c15f3c;
+  --accent-soft: #c15f3c24;
+  --on-accent: #fff;
+  --ok: #3f7d20;
+  --warn: #9a6200;
+  --warn-soft: #9a620020;
+  --danger: #b8322a;
+  --shadow: #1f1e1d33;
+  --backdrop: #1f1e1d55;
+  color-scheme: light;
 }
 
 * {
@@ -44,17 +68,27 @@ button:hover {
 button.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 button.primary:hover {
   filter: brightness(1.08);
 }
 button.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   background: none;
   border: none;
-  padding: 4px 7px;
-  font-size: 16px;
+  border-radius: 6px;
   color: var(--muted);
+}
+button.icon .ico {
+  display: block;
+  width: 16px;
+  height: 16px;
 }
 button.icon:hover {
   color: var(--text);
@@ -102,14 +136,15 @@ input:focus {
 .brand {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 2px;
   padding: 10px 10px 6px 14px;
 }
 .brand .logo {
-  color: var(--accent);
-  font-size: 18px;
+  width: 22px;
+  height: 22px;
 }
 .brand .name {
+  margin-left: 6px;
   font-weight: 600;
 }
 .spacer {
@@ -147,9 +182,13 @@ input:focus {
   white-space: nowrap;
 }
 .project-header button.icon {
-  font-size: 14px;
-  padding: 0 5px;
+  width: 22px;
+  height: 22px;
   visibility: hidden;
+}
+.project-header button.icon .ico {
+  width: 14px;
+  height: 14px;
 }
 .project:hover .project-header button.icon {
   visibility: visible;
@@ -205,7 +244,7 @@ input:focus {
   color: var(--accent);
 }
 .badge.lock {
-  background: #e0a84f26;
+  background: var(--warn-soft);
   color: var(--warn);
 }
 .badge.cloud {
@@ -256,17 +295,67 @@ input:focus {
   position: relative;
 }
 
+#tabbar {
+  display: flex;
+  align-items: flex-end;
+  background: var(--bg-side);
+  border-bottom: 1px solid var(--border);
+  min-height: 37px;
+}
+#tabbar.hidden {
+  display: none;
+}
 #tabs {
+  flex: 1;
+  min-width: 0;
   display: flex;
   gap: 2px;
   padding: 6px 6px 0;
-  background: var(--bg-side);
-  border-bottom: 1px solid var(--border);
   overflow-x: auto;
-  min-height: 37px;
+  /* The active tab overlaps the bar border by 1px; don't let that scroll. */
+  overflow-y: hidden;
 }
-#tabs:empty {
-  display: none;
+#layouts {
+  display: flex;
+  gap: 2px;
+  padding: 0 8px;
+  align-self: center;
+}
+#layouts button {
+  display: flex;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 4px 5px;
+  color: var(--muted);
+}
+#layouts button:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+#layouts button.on {
+  color: var(--accent);
+  border-color: var(--border);
+  background: var(--bg);
+}
+#layouts svg rect {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+}
+.tab .pane-badge {
+  flex: none;
+  min-width: 15px;
+  padding: 0 3px;
+  border-radius: 3px;
+  font-size: 10px;
+  text-align: center;
+  background: var(--bg-hover);
+  color: var(--muted);
+}
+.tab.active .pane-badge {
+  background: var(--accent);
+  color: var(--on-accent);
 }
 .tab {
   display: flex;
@@ -319,20 +408,140 @@ input:focus {
 
 #terminals {
   flex: 1;
+  min-height: 0;
+  display: grid;
+  gap: 1px;
+  background: var(--border);
+}
+#terminals[hidden] {
+  display: none;
+}
+#terminals.layout-1 {
+  grid-template: 1fr / 1fr;
+}
+#terminals.layout-2v {
+  grid-template: 1fr / 1fr 1fr;
+}
+#terminals.layout-2h {
+  grid-template: 1fr 1fr / 1fr;
+}
+#terminals.layout-3,
+#terminals.layout-4 {
+  grid-template: 1fr 1fr / 1fr 1fr;
+}
+#terminals.layout-3 > .pane:first-child {
+  grid-row: span 2;
+}
+
+.pane {
   position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg);
+}
+.pane-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--bg-side);
+  border-bottom: 1px solid var(--border);
+  cursor: default;
+}
+.pane-header .t {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pane-num {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  line-height: 16px;
+  border-radius: 4px;
+  text-align: center;
+  font-weight: 600;
+  background: var(--bg-hover);
+}
+.pane.focused .pane-header {
+  color: var(--text);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.pane.focused .pane-num {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.pane-body {
+  position: relative;
+  flex: 1;
   min-height: 0;
 }
+.pane.drop-target::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--accent-soft);
+  outline: 2px dashed var(--accent);
+  outline-offset: -4px;
+  pointer-events: none;
+}
+.pane-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 20px;
+  color: var(--muted);
+  text-align: center;
+}
+.pane-empty p {
+  margin: 0;
+  max-width: 320px;
+}
+.drag-ghost {
+  position: fixed;
+  z-index: 50;
+  max-width: 260px;
+  padding: 4px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg-active);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  box-shadow: 0 6px 20px var(--shadow);
+  pointer-events: none;
+}
+body.dragging,
+body.dragging * {
+  cursor: grabbing !important;
+  user-select: none;
+}
+
 .term {
   position: absolute;
   inset: 0;
-  padding: 8px 4px 4px 10px;
-  display: none;
 }
-.term.active {
-  display: block;
-}
+/* The padding must sit on .xterm, not on its parent: FitAddon subtracts the
+   terminal element's padding but reads the parent's border-box size, so parent
+   padding makes it propose one row/column too many. */
 .term .xterm {
   height: 100%;
+  padding: 8px 4px 4px 10px;
+}
+/* xterm.css paints its viewport #000, and the viewport also covers the
+   padding above: match the terminal background (same as --bg in both themes)
+   so the padding doesn't show as a black frame. */
+.term .xterm .xterm-viewport {
+  background-color: var(--bg);
 }
 
 #welcome {
@@ -355,8 +564,8 @@ input:focus {
   margin: 4px 0 10px;
 }
 .big-logo {
-  font-size: 54px;
-  color: var(--accent);
+  width: 88px;
+  height: 88px;
 }
 .warning {
   color: var(--warn);
@@ -372,10 +581,10 @@ dialog {
   border-radius: 10px;
   padding: 20px 22px;
   width: min(520px, 92vw);
-  box-shadow: 0 20px 60px #0008;
+  box-shadow: 0 20px 60px var(--shadow);
 }
 dialog::backdrop {
-  background: #0009;
+  background: var(--backdrop);
 }
 dialog h2 {
   margin: 0 0 14px;
@@ -428,7 +637,7 @@ dialog menu {
   border-left: 3px solid var(--accent);
   border-radius: 6px;
   padding: 9px 12px;
-  box-shadow: 0 6px 20px #0006;
+  box-shadow: 0 6px 20px var(--shadow);
   white-space: pre-line;
 }
 .toast.error {
@@ -436,4 +645,63 @@ dialog menu {
 }
 .toast.warn {
   border-left-color: var(--warn);
+}
+
+/* ---------- sync settings ---------- */
+
+dialog fieldset {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px 4px;
+  margin: 0 0 14px;
+}
+dialog legend {
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+dialog select {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 9px;
+}
+dialog label.narrow {
+  flex: 0 0 90px;
+}
+dialog label.check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+dialog label.check input {
+  width: auto;
+}
+#fingerprint {
+  margin: 0 0 12px;
+  font-size: 11px;
+  color: var(--muted);
+  word-break: break-all;
+}
+#fingerprint:empty {
+  display: none;
+}
+.test-row {
+  align-items: center;
+  margin-bottom: 10px;
+}
+#test-result {
+  font-size: 12px;
+}
+#test-result.ok {
+  color: var(--ok);
+}
+#test-result.fail {
+  color: var(--danger);
+}
+dialog {
+  max-height: 92vh;
+  overflow-y: auto;
 }

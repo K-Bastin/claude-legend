@@ -1,7 +1,8 @@
 # Claude Legend
 
 Application desktop (Linux / Windows) qui lance le vrai Claude Code dans un terminal intégré
-et synchronise les conversations entre tes PC via un dossier partagé (Syncthing, Nextcloud, OneDrive…).
+et synchronise les conversations entre tes PC : dossier partagé (Syncthing, Nextcloud, OneDrive…),
+serveur SFTP, FTP/FTPS ou WebDAV.
 
 ## Fonctionnement
 
@@ -10,7 +11,7 @@ et synchronise les conversations entre tes PC via un dossier partagé (Syncthing
 - La barre latérale liste les conversations de `~/.claude/projects`, groupées par projet.
   Un clic lance `claude --resume <id>` dans le bon dossier.
 - La synchro copie sessions, sous-agents, mémoire de projet et checkpoints de fichiers
-  dans `<dossier partagé>/claude-legend/`, en remplaçant les chemins propres à chaque PC
+  vers la destination choisie, en remplaçant les chemins propres à chaque PC
   (`/home/kb/...` ↔ `C:\Users\kb\...`) par des marqueurs.
 - Un projet est reconnu d'un PC à l'autre par son remote git (sinon par le nom du dossier).
   Si un projet n'est pas encore associé sur un PC, l'app demande où il se trouve.
@@ -20,6 +21,19 @@ et synchronise les conversations entre tes PC via un dossier partagé (Syncthing
 
 Le code des projets n'est pas synchronisé : utilise git pour ça.
 
+### Destinations de synchronisation
+
+| Type | Exemple | Remarques |
+| --- | --- | --- |
+| Dossier synchronisé | `~/Sync` | Synchronisé par un autre outil (Syncthing, client Nextcloud, OneDrive…). Les données sont dans `<dossier>/claude-legend/`. |
+| SFTP | `nas.local:22`, dossier `claude-legend` | Mot de passe, clé privée ou agent SSH. L'empreinte du serveur est affichée à la première connexion et vérifiée ensuite. |
+| FTP / FTPS | `ftp.exemple.fr:21` | Cocher « FTPS » pour chiffrer (AUTH TLS, certificats du système). |
+| WebDAV | `https://cloud.exemple.fr/remote.php/dav/files/moi/claude-legend` | Nextcloud, ownCloud, NAS Synology/QNAP… Utilise un mot de passe d'application si le compte a la double authentification. |
+
+Les mots de passe sont conservés dans le trousseau du système (Secret Service sous Linux,
+Gestionnaire d'identifiants sous Windows), jamais dans les fichiers de réglages.
+« Tester la connexion » vérifie l'accès en lecture et en écriture.
+
 ## Raccourcis
 
 | Touche | Action |
@@ -27,6 +41,7 @@ Le code des projets n'est pas synchronisé : utilise git pour ça.
 | Ctrl+Shift+T | Nouvelle session |
 | Ctrl+Shift+W | Fermer l'onglet |
 | Ctrl+Tab | Onglet suivant |
+| Ctrl+Alt+1…4 | Aller au panneau 1 à 4 (écran partagé) |
 | Shift+Entrée | Retour à la ligne dans le prompt |
 | Ctrl+C / Ctrl+Shift+C | Copier la sélection (Ctrl+C sans sélection = interrompre) |
 | Ctrl+V / Ctrl+Shift+V | Coller (une image du presse-papier est transmise à Claude) |
@@ -34,14 +49,27 @@ Le code des projets n'est pas synchronisé : utilise git pour ça.
 
 Glisser-déposer un fichier dans le terminal insère son chemin.
 
+### Thème clair / sombre
+
+Le bouton ☀/☾ de la barre latérale bascule entre clair et sombre ; les réglages proposent aussi
+« Comme le système ». Claude Code choisit lui-même une partie de ses couleurs : en thème clair,
+passe-le aussi en clair avec `/config` → *Theme*.
+
+### Écran partagé
+
+Les boutons à droite des onglets affichent 1, 2 (côte à côte ou empilés), 3 ou 4 conversations
+en même temps. La conversation choisie (liste ou onglet) s'ouvre dans le panneau actif, surligné ;
+un onglet ou une conversation de la liste peut aussi être glissé directement dans un panneau.
+La disposition et le contenu des panneaux sont retrouvés au prochain lancement.
+
 ## Développement
 
 ```sh
 npm install
 npm run tauri dev      # lancer en dev
 npm run tauri build    # paquets .deb / .rpm / AppImage (Linux)
-cd src-tauri && cargo test
+npm test               # tests Rust
 ```
 
-Les paquets Windows (.msi / .exe) se construisent sur Windows ou via le workflow
-GitHub Actions `.github/workflows/build.yml` (push d'un tag `v*` ou lancement manuel).
+Branches, conventions de commit et procédure de release : voir [CONTRIBUTING.md](CONTRIBUTING.md).
+Les paquets Windows (.msi / .exe) sont produits par le workflow `release` lors d'un tag `vX.Y.Z` sur `main`.

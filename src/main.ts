@@ -3,6 +3,7 @@ import "./styles.css";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -10,11 +11,14 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { icon } from "./icons";
+import { applyTheme, loadThemeMode, onSystemThemeChange, saveThemeMode, TERMINAL_THEMES, type ThemeMode } from "./theme";
+import { fillSyncForm, missingSyncField, readSyncForm, updateSyncVisibility, type SyncTarget } from "./sync-form";
 
 // ---------- types ----------
 
 interface Settings {
-  syncDir: string | null;
+  sync: SyncTarget;
   claudePath: string | null;
   extraArgs: string;
   machineName: string;
@@ -60,6 +64,7 @@ interface AppInfo {
   claudePath: string | null;
   claudeError: string | null;
   syncEnabled: boolean;
+  syncLabel: string;
   lastReport: SyncReport | null;
   home: string;
 }
@@ -94,6 +99,47 @@ let syncing = false;
 const tabs: Tab[] = [];
 let activeTab: Tab | null = null;
 let tabSeq = 0;
+// Applied before anything renders to avoid a flash of the wrong theme.
+let themeMode: ThemeMode = loadThemeMode();
+let theme = applyTheme(themeMode);
+let layout: LayoutId = "1";
+/** Tab shown in each pane of the current layout. */
+let panes: (Tab | null)[] = [null];
+let activePane = 0;
+/** Set once the window is closing: sessions stopped by the shutdown must still be restored. */
+let shuttingDown = false;
+/** SFTP host key approved in the settings dialog, see readSyncForm. */
+let approvedFingerprint: string | null = null;
+
+interface TestOutcome {
+  ok: boolean;
+  message: string;
+  unknownFingerprint: string | null;
+}
+
+const OPEN_TABS_KEY = "claude-legend:open-tabs";
+
+interface SavedTab {
+  sessionId: string;
+  cwd: string;
+  title: string;
+  active: boolean;
+  /** Pane the tab was shown in, if any. */
+  pane?: number | null;
+}
+
+type LayoutId = "1" | "2v" | "2h" | "3" | "4";
+
+const LAYOUT_KEY = "claude-legend:layout";
+
+/** Rectangles drawn in a 16×12 box for each layout button. */
+const LAYOUTS: { id: LayoutId; panes: number; label: string; rects: [number, number, number, number][] }[] = [
+  { id: "1", panes: 1, label: "Un seul panneau", rects: [[1, 1, 14, 10]] },
+  { id: "2v", panes: 2, label: "Deux panneaux côte à côte", rects: [[1, 1, 6.5, 10], [8.5, 1, 6.5, 10]] },
+  { id: "2h", panes: 2, label: "Deux panneaux l'un sur l'autre", rects: [[1, 1, 14, 4.5], [1, 6.5, 14, 4.5]] },
+  { id: "3", panes: 3, label: "Trois panneaux", rects: [[1, 1, 6.5, 10], [8.5, 1, 6.5, 4.5], [8.5, 6.5, 6.5, 4.5]] },
+  { id: "4", panes: 4, label: "Quatre panneaux", rects: [[1, 1, 6.5, 4.5], [8.5, 1, 6.5, 4.5], [1, 6.5, 6.5, 4.5], [8.5, 6.5, 6.5, 4.5]] },
+];
 
 // ---------- helpers ----------
 
@@ -186,7 +232,7 @@ function renderSessions() {
   for (const [, group] of groups) {
     const first = group[0];
     const cwd = group.find((s) => s.cwd)?.cwd ?? null;
-    const addBtn = el("button", { className: "icon", textContent: "＋", title: cwd ? `Nouvelle session dans ${cwd}` : "Associer à un dossier" });
+    const addBtn = el("button", { className: "icon", innerHTML: icon("plus"), title: cwd ? `Nouvelle session dans ${cwd}` : "Associer à un dossier" });
     addBtn.onclick = (e) => {
       e.stopPropagation();
       if (cwd) startNewSession(cwd);
@@ -219,6 +265,12 @@ function renderSessions() {
         el("div", { className: "meta", textContent: meta }),
       );
       item.onclick = () => resumeSession(s);
+      makeDraggable(item, () => s.title, (pane) => {
+        const open = tabs.find((t) => t.sessionId === s.id);
+        if (open) return showInPane(open, pane);
+        activePane = pane;
+        resumeSession(s);
+      });
       return item;
     });
     nodes.push(el("div", { className: "project" }, header, ...items));
@@ -249,7 +301,7 @@ function renderStatus() {
       lines.push(errs);
     }
   }
-  lines.push(el("div", { textContent: settings.machineName }));
+  lines.push(el("div", { textContent: info.syncEnabled ? `${settings.machineName} · ${info.syncLabel}` : settings.machineName }));
   status.replaceChildren(...lines);
 }
 
@@ -303,14 +355,7 @@ function createTab(title: string, cwd: string, sessionId: string | null): Tab {
     fontSize: settings.fontSize,
     scrollback: 20000,
     macOptionIsMeta: true,
-    theme: {
-      background: "#1a1918",
-      foreground: "#ece8e1",
-      cursor: "#d97757",
-      selectionBackground: "#d9775755",
-      black: "#1a1918",
-      brightBlack: "#6b645c",
-    },
+    theme: TERMINAL_THEMES[theme],
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
@@ -319,7 +364,7 @@ function createTab(title: string, cwd: string, sessionId: string | null): Tab {
   term.unicode.activeVersion = "11";
 
   const container = el("div", { className: "term" });
-  $("#terminals").append(container);
+  $("#term-holder").append(container);
   term.open(container);
 
   const tabEl = el("div", { className: "tab" });
@@ -338,6 +383,7 @@ function createTab(title: string, cwd: string, sessionId: string | null): Tab {
   };
   tabEl.onclick = () => activateTab(tab);
   tabEl.onauxclick = (e) => e.button === 1 && closeTab(tab);
+  makeDraggable(tabEl, () => tab.title, (pane) => showInPane(tab, pane));
   $("#tabs").append(tabEl);
   renderTab(tab);
 
@@ -360,7 +406,8 @@ function createTab(title: string, cwd: string, sessionId: string | null): Tab {
     }
   });
   new ResizeObserver(() => {
-    if (container.classList.contains("active")) fit.fit();
+    // Terminals parked in the hidden holder have no size to fit to.
+    if (container.offsetParent !== null) fit.fit();
   }).observe(container);
 
   tabs.push(tab);
@@ -375,27 +422,24 @@ function renderTab(tab: Tab) {
     closeTab(tab);
   };
   tab.tabEl.className = `tab${tab === activeTab ? " active" : ""}${tab.exited ? " exited" : ""}`;
+  saveOpenTabs();
   tab.tabEl.title = `${tab.title}\n${tab.cwd}`;
+  const pane = panes.indexOf(tab);
+  const badge = panes.length > 1 && pane !== -1 ? el("span", { className: "pane-badge", textContent: String(pane + 1) }) : null;
   tab.tabEl.replaceChildren(
-    ...[tab.activity ? el("span", { className: "activity" }) : null, el("span", { className: "t", textContent: tab.title }), close].filter(
+    ...[badge, tab.activity ? el("span", { className: "activity" }) : null, el("span", { className: "t", textContent: tab.title }), close].filter(
       (n): n is HTMLElement => n !== null,
     ),
   );
+  const header = document.querySelectorAll<HTMLElement>("#terminals > .pane .pane-header .t")[pane];
+  if (header) header.textContent = tab.title;
 }
 
+/** Focuses the tab's pane, or shows the tab in the focused pane. */
 function activateTab(tab: Tab) {
-  activeTab = tab;
-  tab.activity = false;
-  for (const t of tabs) {
-    t.el.classList.toggle("active", t === tab);
-    renderTab(t);
-  }
-  $("#welcome").classList.add("hidden");
-  requestAnimationFrame(() => {
-    tab.fit.fit();
-    tab.term.focus();
-  });
-  renderSessions();
+  const pane = panes.indexOf(tab);
+  if (pane !== -1) focusPane(pane);
+  else showInPane(tab, activePane);
 }
 
 function closeTab(tab: Tab) {
@@ -404,13 +448,161 @@ function closeTab(tab: Tab) {
   tab.el.remove();
   tab.tabEl.remove();
   tabs.splice(tabs.indexOf(tab), 1);
-  if (activeTab === tab) {
-    activeTab = null;
-    const next = tabs[tabs.length - 1];
-    if (next) activateTab(next);
-    else $("#welcome").classList.remove("hidden");
-  }
+  const pane = panes.indexOf(tab);
+  if (pane !== -1) panes[pane] = nextHiddenTab();
+  renderPanes();
+  focusPane(activePane);
+}
+
+// ---------- panes ----------
+
+function nextHiddenTab(): Tab | null {
+  return [...tabs].reverse().find((t) => !panes.includes(t)) ?? null;
+}
+
+function layoutPaneCount(id: LayoutId): number {
+  return LAYOUTS.find((l) => l.id === id)?.panes ?? 1;
+}
+
+/** Rebuilds the pane grid and puts every terminal in its pane or in the hidden holder. */
+function renderPanes() {
+  const split = panes.length > 1;
+  const nodes = panes.map((tab, i) => {
+    const body = el("div", { className: "pane-body" });
+    if (tab) {
+      body.append(tab.el);
+    } else {
+      const button = el("button", { textContent: "Nouvelle session…" });
+      button.onclick = () => {
+        focusPane(i, false);
+        startNewSession();
+      };
+      body.append(
+        el(
+          "div",
+          { className: "pane-empty" },
+          el("p", { textContent: "Choisis une conversation dans la liste, clique sur un onglet, ou glisse-le ici." }),
+          button,
+        ),
+      );
+    }
+    const header = split
+      ? el(
+          "div",
+          { className: "pane-header" },
+          el("span", { className: "pane-num", textContent: String(i + 1) }),
+          el("span", { className: "t", textContent: tab?.title ?? "Panneau vide" }),
+        )
+      : null;
+    const pane = el("div", { className: "pane" }, header, body);
+    pane.addEventListener("mousedown", () => activePane !== i && focusPane(i, false));
+    pane.addEventListener("focusin", () => activePane !== i && focusPane(i, false));
+    return pane;
+  });
+  const holder = $("#term-holder");
+  for (const t of tabs) if (!panes.includes(t)) holder.append(t.el);
+  const grid = $("#terminals");
+  grid.className = `layout-${layout}`;
+  grid.replaceChildren(...nodes);
+  // With no conversation open only the welcome screen shows, not an empty pane under it.
+  grid.hidden = tabs.length === 0;
+  $("#welcome").classList.toggle("hidden", tabs.length > 0);
+  $("#tabbar").classList.toggle("hidden", tabs.length === 0);
+  requestAnimationFrame(() => panes.forEach((t) => t?.fit.fit()));
+}
+
+function focusPane(index: number, focusTerminal = true) {
+  activePane = Math.min(index, panes.length - 1);
+  activeTab = panes[activePane] ?? null;
+  if (activeTab) activeTab.activity = false;
+  document
+    .querySelectorAll("#terminals > .pane")
+    .forEach((p, i) => p.classList.toggle("focused", panes.length > 1 && i === activePane));
+  tabs.forEach(renderTab);
+  const tab = activeTab;
+  if (focusTerminal && tab) requestAnimationFrame(() => tab.term.focus());
   renderSessions();
+}
+
+/** Shows a tab in a pane; if it was already visible elsewhere the two panes swap. */
+function showInPane(tab: Tab, index: number) {
+  const from = panes.indexOf(tab);
+  if (from !== -1 && from !== index) panes[from] = panes[index];
+  panes[index] = tab;
+  renderPanes();
+  focusPane(index);
+}
+
+function setLayout(id: LayoutId) {
+  const count = layoutPaneCount(id);
+  const keep = activeTab;
+  layout = id;
+  panes = Array.from({ length: count }, (_, i) => panes[i] ?? null);
+  activePane = Math.min(activePane, count - 1);
+  if (keep && !panes.includes(keep)) panes[activePane] = keep;
+  for (let i = 0; i < count; i++) panes[i] ??= nextHiddenTab();
+  try {
+    localStorage.setItem(LAYOUT_KEY, id);
+  } catch {
+    // Layout just won't be remembered.
+  }
+  renderLayoutPicker();
+  renderPanes();
+  focusPane(activePane);
+}
+
+function renderLayoutPicker() {
+  $("#layouts").replaceChildren(
+    ...LAYOUTS.map((l) => {
+      const button = el("button", { className: l.id === layout ? "on" : "", title: l.label });
+      button.innerHTML = `<svg width="16" height="12" viewBox="0 0 16 12" aria-hidden="true">${l.rects
+        .map(([x, y, w, h]) => `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="1"/>`)
+        .join("")}</svg>`;
+      button.onclick = () => setLayout(l.id);
+      return button;
+    }),
+  );
+}
+
+function paneAt(x: number, y: number): number {
+  const pane = document.elementFromPoint(x, y)?.closest("#terminals > .pane");
+  return pane ? [...$("#terminals").children].indexOf(pane) : -1;
+}
+
+/**
+ * Mouse-driven drag towards a pane. HTML5 drag and drop is not used because
+ * Tauri intercepts it on Windows for file drops.
+ */
+function makeDraggable(handle: HTMLElement, label: () => string, onDrop: (pane: number) => void) {
+  handle.addEventListener("mousedown", (down) => {
+    if (down.button !== 0) return;
+    let ghost: HTMLElement | null = null;
+    const highlight = (index: number) =>
+      document.querySelectorAll("#terminals > .pane").forEach((p, i) => p.classList.toggle("drop-target", i === index));
+    const move = (e: MouseEvent) => {
+      if (!ghost) {
+        if (Math.hypot(e.clientX - down.clientX, e.clientY - down.clientY) < 6) return;
+        ghost = el("div", { className: "drag-ghost", textContent: label() });
+        document.body.append(ghost);
+        document.body.classList.add("dragging");
+      }
+      ghost.style.left = `${e.clientX + 12}px`;
+      ghost.style.top = `${e.clientY + 12}px`;
+      highlight(paneAt(e.clientX, e.clientY));
+    };
+    const up = (e: MouseEvent) => {
+      removeEventListener("mousemove", move);
+      removeEventListener("mouseup", up, true);
+      if (!ghost) return;
+      ghost.remove();
+      document.body.classList.remove("dragging");
+      highlight(-1);
+      const pane = paneAt(e.clientX, e.clientY);
+      if (pane !== -1) onDrop(pane);
+    };
+    addEventListener("mousemove", move);
+    addEventListener("mouseup", up, true);
+  });
 }
 
 async function launch(tab: Tab, sessionId: string | null): Promise<boolean> {
@@ -418,7 +610,7 @@ async function launch(tab: Tab, sessionId: string | null): Promise<boolean> {
   channel.onmessage = (event) => {
     if (event.kind === "data") {
       tab.term.write(event.data);
-      if (tab !== activeTab && !tab.activity) {
+      if (!panes.includes(tab) && !tab.activity) {
         tab.activity = true;
         renderTab(tab);
       }
@@ -448,6 +640,61 @@ async function launch(tab: Tab, sessionId: string | null): Promise<boolean> {
     renderTab(tab);
     return false;
   }
+}
+
+// ---------- tab persistence ----------
+
+/** Remembers running sessions so they come back if the app restarts or is killed. */
+function saveOpenTabs() {
+  if (shuttingDown) return;
+  const saved: SavedTab[] = tabs
+    .filter((t) => t.sessionId && !t.exited)
+    .map((t) => ({
+      sessionId: t.sessionId!,
+      cwd: t.cwd,
+      title: t.title,
+      active: t === activeTab,
+      pane: panes.includes(t) ? panes.indexOf(t) : null,
+    }));
+  try {
+    localStorage.setItem(OPEN_TABS_KEY, JSON.stringify(saved));
+  } catch {
+    // Storage unavailable: tabs simply won't be restored.
+  }
+}
+
+function loadSavedTabs(): SavedTab[] {
+  try {
+    const saved = JSON.parse(localStorage.getItem(OPEN_TABS_KEY) ?? "[]");
+    return Array.isArray(saved) ? saved : [];
+  } catch {
+    return [];
+  }
+}
+
+async function restoreTabs() {
+  // Sessions with no prompt yet have no file to resume from.
+  const resumable = new Set(sessions.filter((s) => s.location === "local").map((s) => s.id));
+  let active: Tab | null = null;
+  const placed: [Tab, number | null | undefined][] = [];
+  for (const saved of loadSavedTabs()) {
+    if (!resumable.has(saved.sessionId) || tabs.some((t) => t.sessionId === saved.sessionId)) continue;
+    const tab = createTab(saved.title, saved.cwd, saved.sessionId);
+    tab.term.write("\x1b[2m[Session rouverte après le redémarrage de Claude Legend]\x1b[0m\r\n");
+    placed.push([tab, saved.pane]);
+    await launch(tab, saved.sessionId);
+    if (saved.active) active = tab;
+  }
+  if (placed.length) {
+    panes = panes.map(() => null);
+    for (const [tab, pane] of placed) if (pane != null && pane < panes.length && !panes[pane]) panes[pane] = tab;
+    for (let i = 0; i < panes.length; i++) panes[i] ??= nextHiddenTab();
+    renderPanes();
+    const activeIndex = active ? panes.indexOf(active) : -1;
+    if (active && activeIndex === -1) showInPane(active, activePane);
+    else focusPane(Math.max(activeIndex, 0));
+  }
+  saveOpenTabs();
 }
 
 async function restartTab(tab: Tab) {
@@ -491,9 +738,22 @@ async function startNewSession(cwd?: string) {
   setTimeout(refreshSessions, 3000);
 }
 
+/** Ctrl+Alt+1..4 focuses a pane. Uses the physical key so it works on AZERTY too. */
+function handlePaneShortcut(e: KeyboardEvent): boolean {
+  const match = /^Digit([1-4])$/.exec(e.code);
+  if (!match || !e.ctrlKey || !e.altKey) return false;
+  const index = Number(match[1]) - 1;
+  if (index < panes.length) focusPane(index);
+  return true;
+}
+
 /** Returns false to stop xterm from handling the key. */
 function handleKey(tab: Tab, e: KeyboardEvent): boolean {
   if (e.type !== "keydown") return true;
+  if (handlePaneShortcut(e)) {
+    e.preventDefault();
+    return false;
+  }
   const ctrl = e.ctrlKey || e.metaKey;
   const key = e.key.toLowerCase();
 
@@ -556,48 +816,136 @@ function sendRaw(tab: Tab, data: string) {
   if (tab.ptyId !== null && !tab.exited) invoke("pty_write", { id: tab.ptyId, data }).catch(() => {});
 }
 
+// ---------- theme ----------
+
+function setThemeMode(mode: ThemeMode) {
+  themeMode = mode;
+  saveThemeMode(mode);
+  refreshTheme();
+}
+
+function refreshTheme() {
+  theme = applyTheme(themeMode);
+  for (const t of tabs) t.term.options.theme = TERMINAL_THEMES[theme];
+  const button = $("#btn-theme");
+  button.innerHTML = icon(theme === "dark" ? "moon" : "sun");
+  button.title = theme === "dark" ? "Passer en thème clair" : "Passer en thème sombre";
+}
+
 // ---------- settings ----------
 
-function openSettings() {
+function settingsField(name: string) {
+  return $<HTMLFormElement>("#settings-form").elements.namedItem(name) as HTMLInputElement;
+}
+
+function renderFingerprint() {
+  const target = readSyncForm($<HTMLFormElement>("#settings-form"), approvedFingerprint);
+  $("#fingerprint").textContent =
+    target.kind === "sftp" && approvedFingerprint ? `Serveur approuvé — empreinte ${approvedFingerprint}` : "";
+}
+
+function showTestResult(text: string, kind: "ok" | "fail" | "" = "") {
+  const result = $("#test-result");
+  result.textContent = text;
+  result.className = kind;
+}
+
+async function openSettings() {
   const form = $<HTMLFormElement>("#settings-form");
-  const field = (name: string) => form.elements.namedItem(name) as HTMLInputElement;
-  field("syncDir").value = settings.syncDir ?? "";
-  field("machineName").value = settings.machineName;
-  field("claudePath").value = settings.claudePath ?? "";
-  field("extraArgs").value = settings.extraArgs;
-  field("fontSize").value = String(settings.fontSize);
-  field("syncIntervalSecs").value = String(settings.syncIntervalSecs);
+  fillSyncForm(form, settings.sync);
+  approvedFingerprint = settings.sync.kind === "sftp" ? settings.sync.fingerprint : null;
+  renderFingerprint();
+  showTestResult("");
+  settingsField("machineName").value = settings.machineName;
+  settingsField("theme").value = themeMode;
+  settingsField("claudePath").value = settings.claudePath ?? "";
+  settingsField("extraArgs").value = settings.extraArgs;
+  settingsField("fontSize").value = String(settings.fontSize);
+  settingsField("syncIntervalSecs").value = String(settings.syncIntervalSecs);
   $("#claude-detected").textContent = info.claudePath ? `Détecté : ${info.claudePath}` : info.claudeError ?? "";
+  const hasSecret = settings.sync.kind !== "none" && (await invoke<boolean>("has_sync_secret", { target: settings.sync }).catch(() => false));
+  settingsField("secret").placeholder = hasSecret ? "enregistré — laisser vide pour le conserver" : "";
   const dialog = $<HTMLDialogElement>("#settings-dialog");
   dialog.returnValue = "";
   dialog.showModal();
 }
 
+/** Tests the target in the form, asking to approve an unknown SFTP host key. */
+async function testSyncTarget(): Promise<{ ok: boolean; message: string }> {
+  const target = readSyncForm($<HTMLFormElement>("#settings-form"), approvedFingerprint);
+  const missing = missingSyncField(target);
+  if (missing) return { ok: false, message: missing };
+  if (target.kind === "none") return { ok: true, message: "" };
+  const secret = settingsField("secret").value || null;
+  showTestResult("Connexion…");
+  try {
+    let outcome = await invoke<TestOutcome>("test_sync", { target, secret });
+    if (outcome.unknownFingerprint && target.kind === "sftp") {
+      const choice = await ask(
+        `Première connexion à ${target.host}. Empreinte de la clé du serveur :\n\n${outcome.unknownFingerprint}\n\n` +
+          `Vérifie qu'elle correspond à celle du serveur (sur le serveur : ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub). ` +
+          `Faire confiance à ce serveur ?`,
+        [
+          { label: "Annuler", value: "cancel" },
+          { label: "Faire confiance", value: "trust", primary: true },
+        ],
+      );
+      if (choice !== "trust") return { ok: false, message: "Serveur non approuvé." };
+      approvedFingerprint = outcome.unknownFingerprint;
+      renderFingerprint();
+      outcome = await invoke<TestOutcome>("test_sync", { target: { ...target, fingerprint: approvedFingerprint }, secret });
+    }
+    return { ok: outcome.ok, message: outcome.message };
+  } catch (e) {
+    return { ok: false, message: `${e}` };
+  }
+}
+
+async function runSyncTest(): Promise<boolean> {
+  const { ok, message } = await testSyncTarget();
+  showTestResult(ok ? message || "Connexion réussie." : message, ok ? "ok" : "fail");
+  return ok;
+}
+
+/** Validates the sync target before the dialog closes; false keeps it open. */
+async function confirmSave(): Promise<boolean> {
+  const target = readSyncForm($<HTMLFormElement>("#settings-form"), approvedFingerprint);
+  const changed = JSON.stringify(target) !== JSON.stringify(settings.sync) || settingsField("secret").value !== "";
+  if (!changed || target.kind === "none") return true;
+  if (await runSyncTest()) return true;
+  const missing = missingSyncField(target);
+  if (missing) return false;
+  const choice = await ask(`La connexion a échoué :\n${$("#test-result").textContent}\n\nEnregistrer quand même ?`, [
+    { label: "Corriger", value: "fix", primary: true },
+    { label: "Enregistrer quand même", value: "save" },
+  ]);
+  return choice === "save";
+}
+
 async function saveSettingsFromForm() {
-  const form = $<HTMLFormElement>("#settings-form");
-  const field = (name: string) => (form.elements.namedItem(name) as HTMLInputElement).value.trim();
+  const field = (name: string) => settingsField(name).value.trim();
   const next: Settings = {
-    syncDir: field("syncDir") || null,
+    sync: readSyncForm($<HTMLFormElement>("#settings-form"), approvedFingerprint),
     machineName: field("machineName") || settings.machineName,
     claudePath: field("claudePath") || null,
     extraArgs: field("extraArgs"),
     fontSize: Number(field("fontSize")) || 14,
     syncIntervalSecs: Number(field("syncIntervalSecs")) || 60,
   };
+  const secret = settingsField("secret").value || null;
+  settingsField("secret").value = "";
+  setThemeMode(settingsField("theme").value as ThemeMode);
   try {
-    await invoke("save_settings", { settings: next });
+    await invoke("save_settings", { settings: next, secret });
     settings = next;
     info = await invoke<AppInfo>("app_info");
     for (const t of tabs) {
       t.term.options.fontSize = settings.fontSize;
       t.fit.fit();
     }
+    syncing = info.syncEnabled;
     renderStatus();
     renderWelcomeWarning();
-    if (settings.syncDir) {
-      syncing = true;
-      renderStatus();
-    }
   } catch (e) {
     toast(`Réglages non enregistrés : ${e}`, "error");
   }
@@ -610,6 +958,9 @@ function renderWelcomeWarning() {
 // ---------- boot ----------
 
 async function boot() {
+  if (import.meta.env.DEV && !("__TAURI_INTERNALS__" in window)) {
+    (await import("./dev/preview")).installPreview();
+  }
   settings = await invoke<Settings>("get_settings");
   info = await invoke<AppInfo>("app_info");
   lastReport = info.lastReport;
@@ -619,17 +970,48 @@ async function boot() {
   $("#btn-new").onclick = () => startNewSession();
   $("#btn-new-welcome").onclick = () => startNewSession();
   $("#btn-sync").onclick = syncNow;
+  $("#btn-new").innerHTML = icon("plus");
+  $("#btn-sync").innerHTML = icon("sync");
+  $("#btn-settings").innerHTML = icon("settings");
   $("#btn-settings").onclick = openSettings;
+  $("#btn-theme").onclick = () => setThemeMode(theme === "dark" ? "light" : "dark");
+  onSystemThemeChange(() => themeMode === "system" && refreshTheme());
+  refreshTheme();
   $("#search").oninput = renderSessions;
+  const settingsForm = $<HTMLFormElement>("#settings-form");
   $("#pick-sync-dir").onclick = async () => {
     const dir = await pickFolder("Dossier synchronisé entre tes PC");
-    if (dir) ((($("#settings-form") as HTMLFormElement).elements.namedItem("syncDir")) as HTMLInputElement).value = dir;
+    if (dir) settingsField("folderPath").value = dir;
   };
+  $("#pick-key").onclick = async () => {
+    const key = await openDialog({ multiple: false, directory: false, title: "Clé privée SSH", defaultPath: `${info.home}/.ssh` });
+    if (typeof key === "string") settingsField("keyPath").value = key;
+  };
+  $("#test-sync").onclick = () => runSyncTest();
+  settingsForm.addEventListener("change", (e) => {
+    const name = (e.target as HTMLInputElement).name;
+    if (name === "syncKind" || name === "sftpAuth") updateSyncVisibility(settingsForm);
+    showTestResult("");
+  });
+  settingsForm.addEventListener("input", (e) => {
+    // A different server needs its own host key approval.
+    const name = (e.target as HTMLInputElement).name;
+    if (name === "host" || name === "port") {
+      approvedFingerprint = null;
+      renderFingerprint();
+    }
+  });
+  settingsForm.addEventListener("submit", async (e) => {
+    if ((e.submitter as HTMLButtonElement | null)?.value !== "save") return;
+    e.preventDefault();
+    if (await confirmSave()) $<HTMLDialogElement>("#settings-dialog").close("save");
+  });
   $<HTMLDialogElement>("#settings-dialog").addEventListener("close", (e) => {
     if ((e.target as HTMLDialogElement).returnValue === "save") saveSettingsFromForm();
   });
 
   document.addEventListener("keydown", (e) => {
+    if (handlePaneShortcut(e)) return e.preventDefault();
     const ctrl = e.ctrlKey || e.metaKey;
     if (ctrl && e.shiftKey && e.key.toLowerCase() === "t") {
       e.preventDefault();
@@ -654,13 +1036,29 @@ async function boot() {
     renderStatus();
     if (e.payload.conflicts.length) toast(e.payload.conflicts.join("\n"), "warn", 15000);
   });
+  await getCurrentWindow().onCloseRequested(() => {
+    saveOpenTabs();
+    shuttingDown = true;
+  });
   await listen("sessions-changed", () => refreshSessions());
   window.addEventListener("focus", () => refreshSessions());
   setInterval(refreshSessions, 20000);
   setInterval(() => renderSessions(), 60000);
 
+  let savedLayout: string | null = null;
+  try {
+    savedLayout = localStorage.getItem(LAYOUT_KEY);
+  } catch {
+    // Default layout.
+  }
+  layout = LAYOUTS.some((l) => l.id === savedLayout) ? (savedLayout as LayoutId) : "1";
+  panes = Array.from({ length: layoutPaneCount(layout) }, () => null);
+  renderLayoutPicker();
+  renderPanes();
+
   await refreshSessions();
-  if (!info.syncEnabled && !settings.syncDir) {
+  await restoreTabs();
+  if (!info.syncEnabled) {
     toast("Choisis un dossier de synchronisation dans les réglages pour retrouver tes conversations sur tes autres PC.", "info", 10000);
   }
 }
