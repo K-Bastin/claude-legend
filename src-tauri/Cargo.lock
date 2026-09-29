@@ -658,7 +658,7 @@ dependencies = [
 
 [[package]]
 name = "claude-legend"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "argon2",
