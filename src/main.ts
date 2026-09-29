@@ -1425,7 +1425,7 @@ async function boot() {
   };
   settingsForm.addEventListener("change", (e) => {
     const name = (e.target as HTMLInputElement).name;
-    if (name === "syncKind" || name === "sftpAuth") updateSyncVisibility(settingsForm);
+    if (name === "syncKind" || name === "sftpAuth") updateSyncVisibility(settingsForm, name === "syncKind");
     if (name !== "encryptionPassphrase") renderEncryption();
     renderFingerprint();
     showTestResult("");

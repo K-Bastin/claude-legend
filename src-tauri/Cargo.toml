@@ -1,6 +1,6 @@
 [package]
 name = "claude-legend"
-version = "0.6.0"
+version = "0.6.1"
 description = "Claude Code with conversations synchronised between computers"
 authors = ["Kevin Bastin"]
 edition = "2021"

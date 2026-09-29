@@ -274,7 +274,7 @@ impl Remote {
         self.cipher = Some(Some(cipher.clone()));
         let mut rewritten = 0;
         for (path, _) in self.walk("")? {
-            if path.starts_with(".claude-legend-test-") {
+            if path.trim_start_matches('.').starts_with(TEST_FILE_PREFIX) {
                 continue;
             }
             let Some(data) = self.run(|s| s.read(&path))? else {
@@ -399,10 +399,14 @@ impl Remote {
     }
 }
 
+/// Name of the file written by [`test`]. Older versions prefixed it with a dot,
+/// which NAS FTP servers often refuse.
+const TEST_FILE_PREFIX: &str = "claude-legend-test-";
+
 /// Checks that the target is reachable and writable.
 pub fn test(target: &SyncTarget, secret: Option<&str>) -> Result<(), ConnectError> {
     let mut store = connect(target, secret)?;
-    let probe = format!(".claude-legend-test-{}", uuid::Uuid::new_v4());
+    let probe = format!("{TEST_FILE_PREFIX}{}", uuid::Uuid::new_v4());
     store.write(&probe, b"ok")?;
     let back = store.read(&probe)?;
     store.delete(&probe)?;
