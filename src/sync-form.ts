@@ -24,13 +24,29 @@ function field(form: HTMLFormElement, name: string) {
   return form.elements.namedItem(name) as HTMLInputElement & HTMLSelectElement;
 }
 
+/**
+ * Server name out of what users paste: drops a scheme (https://, sftp://…),
+ * credentials, a path and a :port.
+ */
+export function cleanHost(raw: string): string {
+  let host = raw.trim().replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
+  host = host.slice(host.lastIndexOf("@") + 1).split("/")[0];
+  // host:port, but not a bare IPv6 address.
+  if ((host.match(/:/g) ?? []).length === 1) host = host.split(":")[0];
+  return host;
+}
+
 /** Kind plus auth variant, matched against the `data-kinds` attributes. */
 function visibleKinds(form: HTMLFormElement): string[] {
   const kind = field(form, "syncKind").value;
   return kind === "sftp" ? [kind, `sftp-${field(form, "sftpAuth").value}`] : [kind];
 }
 
-export function updateSyncVisibility(form: HTMLFormElement) {
+/**
+ * `kindChanged`: the user picked another type, so a port left at the previous
+ * type's default follows the new type (22 for SFTP, 21 for FTP).
+ */
+export function updateSyncVisibility(form: HTMLFormElement, kindChanged = false) {
   const kinds = visibleKinds(form);
   form.querySelectorAll<HTMLElement>("[data-kinds]").forEach((node) => {
     node.hidden = !node.dataset.kinds!.split(" ").some((k) => kinds.includes(k));
@@ -40,7 +56,8 @@ export function updateSyncVisibility(form: HTMLFormElement) {
   form.querySelector("#secret-label")!.textContent =
     kind === "sftp" && auth === "key" ? "Phrase de passe de la clé (si elle en a une)" : "Mot de passe";
   const port = field(form, "port");
-  if (!port.value && DEFAULT_PORTS[kind]) port.value = String(DEFAULT_PORTS[kind]);
+  const atDefault = !port.value || Object.values(DEFAULT_PORTS).includes(Number(port.value));
+  if (DEFAULT_PORTS[kind] && (!port.value || (kindChanged && atDefault))) port.value = String(DEFAULT_PORTS[kind]);
 }
 
 export function fillSyncForm(form: HTMLFormElement, target: SyncTarget) {
@@ -92,7 +109,7 @@ export function readSyncForm(form: HTMLFormElement, fingerprint: string | null):
     case "sftp":
       return {
         kind,
-        host: value("host"),
+        host: cleanHost(value("host")),
         port: port(22),
         user: value("user"),
         auth: value("sftpAuth") as SftpAuth,
@@ -103,7 +120,7 @@ export function readSyncForm(form: HTMLFormElement, fingerprint: string | null):
     case "ftp":
       return {
         kind,
-        host: value("host"),
+        host: cleanHost(value("host")),
         port: port(21),
         user: value("user"),
         secure: field(form, "ftpSecure").checked,
@@ -136,6 +153,9 @@ export function missingSyncField(target: SyncTarget): string | null {
     case "sftp":
     case "ftp":
       if (!target.host) return "Indique le serveur.";
+      if (/\.ezconnect\.to$/i.test(target.host)) {
+        return "Les adresses EZ-Connect (…ezconnect.to) n'ouvrent que l'interface web du NAS, pas le SFTP ni le FTP : utilise l'adresse IP locale du NAS, ou son adresse VPN depuis l'extérieur.";
+      }
       if (!target.user) return "Indique l'utilisateur.";
       if (target.kind === "sftp" && target.auth === "key" && !target.keyPath) return "Choisis la clé privée.";
       return null;
