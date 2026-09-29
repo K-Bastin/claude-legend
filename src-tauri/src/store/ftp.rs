@@ -86,7 +86,8 @@ impl Store for FtpStore {
             self.mkdir_all(parent);
         }
         let (dir, name) = target.rsplit_once('/').unwrap_or(("", &target));
-        let tmp = super::join(dir, &format!(".{name}.cl-tmp"));
+        // No leading dot: many NAS FTP servers refuse to store "hidden" files.
+        let tmp = super::join(dir, &format!("{name}.cl-tmp"));
         self.ftp.put_file(&tmp, &mut Cursor::new(data))?;
         if self.ftp.rename(&tmp, &target).is_err() {
             // Some servers refuse to rename over an existing file.
